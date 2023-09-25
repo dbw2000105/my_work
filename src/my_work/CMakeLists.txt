@@ -90,7 +90,7 @@ file(GLOB lio_files
 
 # Visual Feature Tracker
 add_executable(feature_tracker ${visual_feature_files})
-target_link_libraries(feature_tracker ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES})
+target_link_libraries(feature_tracker ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES} dw)
 
 ######################
 ### lidar odometry

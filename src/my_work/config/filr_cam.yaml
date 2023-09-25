@@ -5,39 +5,39 @@ imu_topic: "/livox/imu/"
 #camera calibration 
 model_type: PINHOLE
 camera_name: camera
-# image_width: 1280
-# image_height: 1024
-# distortion_parameters:
-#    k1: -0.0982 
-#    k2: 0.0961
-#    p1: 3.1834e-04
-#    p2: -1.0942e-04
-#    k3: -0.0165
-   
-# projection_parameters:
-#    fx: 867.8549
-#    fy: 868.1496
-#    cx: 640.0928
-#    cy: 520.9425
-
-image_width: 640
-image_height: 512
+image_width: 1280
+image_height: 1024
 distortion_parameters:
-   k1: 0
-   k2: 0
-   p1: 0
-   p2: 0
-   k3: 0
-   # k1: -0.0982 
-   # k2: 0.0961
-   # p1: 3.1834e-04
-   # p2: -1.0942e-04
-   # k3: -0.0165
+   k1: -0.0982 
+   k2: 0.0961
+   p1: 3.1834e-04
+   p2: -1.0942e-04
+   k3: -0.0165
+   
 projection_parameters:
-   fx: 433.9275
-   fy: 434.0748
-   cx: 320.0464
-   cy: 260.4712
+   fx: 867.8549
+   fy: 868.1496
+   cx: 640.0928
+   cy: 520.9425
+
+# image_width: 640
+# image_height: 480
+# distortion_parameters:
+#    k1: 0
+#    k2: 0
+#    p1: 0
+#    p2: 0
+#    k3: 0
+#    # k1: -0.0982 
+#    # k2: 0.0961
+#    # p1: 3.1834e-04
+#    # p2: -1.0942e-04
+#    # k3: -0.0165
+# projection_parameters:
+#    fx: 433.9275
+#    fy: 434.0748
+#    cx: 320.0464
+#    cy: 260.4712
 
 # Extrinsic parameter between IMU and Camera.
                         # 1  Have an initial guess about extrinsic parameters. We will optimize around your initial guess.

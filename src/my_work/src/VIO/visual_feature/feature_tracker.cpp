@@ -132,8 +132,6 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time) {
         cout << "mask type wrong " << endl;
       if (mask.size() != forw_img.size()) {
         cout << "wrong size " << endl;
-        cout << "mask size " << mask.size() << endl;
-        cout << "forw_img size " << forw_img.size() << endl;
       }
 
       cv::goodFeaturesToTrack(forw_img, n_pts, MAX_CNT - forw_pts.size(), 0.05,

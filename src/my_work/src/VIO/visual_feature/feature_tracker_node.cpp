@@ -8,6 +8,12 @@
 #include <std_msgs/Bool.h>
 
 #include "feature_tracker.h"
+#include "ros/console.h"
+#define BACKWARD_HAS_DW 1
+#include "backward.hpp"
+namespace backward {
+backward::SignalHandling sh;
+}
 
 #define SHOW_UNDISTORTION 0
 
@@ -80,6 +86,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg) {
   ptr->header.stamp.fromSec(img_msg->header.stamp.toSec() -
                             image_timestamp_bias);
   cv::Mat show_img = ptr->image;
+  ROS_INFO("image size: %d, %d", show_img.rows, show_img.cols);
   // cv::imshow("In imag", show_img);
   // cv::waitKey(1);
   TicToc t_r;
@@ -147,6 +154,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg) {
         }
       }
     }
+    
     feature_points->channels.push_back(id_of_point);
     feature_points->channels.push_back(u_of_point);
     feature_points->channels.push_back(v_of_point);
