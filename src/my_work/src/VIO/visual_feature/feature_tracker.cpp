@@ -27,7 +27,7 @@ void reduceVector(vector<int> &v, vector<uchar> status) {
   v.resize(j);
 }
 
-FeatureTracker::FeatureTracker() {}
+FeatureTracker::FeatureTracker() = default;
 
 void FeatureTracker::setMask() {
   if (FISHEYE)
@@ -91,7 +91,7 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time) {
 
   forw_pts.clear();
 
-  if (cur_pts.size() > 0) {
+  if (!cur_pts.empty()) {
     TicToc t_o;
     vector<uchar> status;
     vector<float> err;

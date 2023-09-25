@@ -1,0 +1,14 @@
+{
+    "python.autoComplete.extraPaths": [
+        "/home/dbstg/slam/fast-lio/fast_lio_ws/devel/lib/python3/dist-packages",
+        "/home/dbstg/slam/GNSS/lc_gvins_ws/devel/lib/python3/dist-packages",
+        "/home/dbstg/slam/GNSS/gvins_ws/devel/lib/python3/dist-packages",
+        "/opt/ros/noetic/lib/python3/dist-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/home/dbstg/slam/fast-lio/fast_lio_ws/devel/lib/python3/dist-packages",
+        "/home/dbstg/slam/GNSS/lc_gvins_ws/devel/lib/python3/dist-packages",
+        "/home/dbstg/slam/GNSS/gvins_ws/devel/lib/python3/dist-packages",
+        "/opt/ros/noetic/lib/python3/dist-packages"
+    ]
+}
