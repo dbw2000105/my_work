@@ -1,4 +1,5 @@
 #include <cv_bridge/cv_bridge.h>
+#include <iomanip>
 #include <message_filters/subscriber.h>
 #include <ros/ros.h>
 #include <sensor_msgs/Image.h>
@@ -8,42 +9,36 @@
 #include <std_msgs/Bool.h>
 
 #include "feature_tracker.h"
-#include "ros/console.h"
-#define BACKWARD_HAS_DW 1
-#include "backward.hpp"
-namespace backward {
-backward::SignalHandling sh;
-}
 
 #define SHOW_UNDISTORTION 0
 
 vector<uchar> r_status;
 vector<float> r_err;
 queue<sensor_msgs::ImageConstPtr> img_buf;
-
+//这里是发布三个话题，pub_img是特征点，pub_match是带特征点的图片，pub_restart则是看看特征追踪是否出错
 ros::Publisher pub_img, pub_match;
 ros::Publisher pub_restart;
 
-FeatureTracker trackerData[NUM_OF_CAM];
+FeatureTracker trackerData
+    [NUM_OF_CAM]; // 图像的追踪信息，包括prev、cur、forw帧的特征以及特征的移动速度等
 double first_image_time;
 int pub_count = 1;
 bool first_image_flag = true;
 double last_image_time = 0;
-bool init_pub = false;
-double cost_time_total = 0;
-long total_frame_idx = 0;
-// double image_timestamp_bias = 1616381480.790033;
-double image_timestamp_bias = 0.0;
+bool init_pub = 0;
+
 void img_callback(const sensor_msgs::ImageConstPtr &img_msg) {
-  // cout <<"Image timestamp: " <<img_msg->header.stamp.toSec() << endl;
-  // printf("Image timestamp = %lf\r\n" , img_msg->header.stamp.toSec());
+  // 读取第一帧图片，如果是第一帧图片
   if (first_image_flag) {
     first_image_flag = false;
     first_image_time = img_msg->header.stamp.toSec();
     last_image_time = img_msg->header.stamp.toSec();
     return;
   }
+  /*******************************************************************************************/
   // detect unstable camera stream
+  // 错误读取的处理
+  // 如果两帧时间差过长或者有问题，就重新开始并发布重新开始的布尔量
   if (img_msg->header.stamp.toSec() - last_image_time > 1.0 ||
       img_msg->header.stamp.toSec() < last_image_time) {
     ROS_WARN("image discontinue! reset the feature tracker!");
@@ -55,12 +50,26 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg) {
     pub_restart.publish(restart_flag);
     return;
   }
+  /*******************************************************************************************/
+  // 通过预设的freq量来进行发布的频率控制
   last_image_time = img_msg->header.stamp.toSec();
-  // frequency control
+  /**
+  节点feature_tracker提取到的特征点会发布到话题/feature_tracker/feature上,发布的频率由配置文件Vins-Mono/config/euroc/euroc_config.yaml中的配置项freq
+  指定.数据集发布相机图像话题/cam0/image_raw的频率未必与配置文件指定的发布频率相同(数据集发布图像的频率一般会高于节点feature_tracker发布特征点的
+  频率),因此需要进行频率控制,抽帧发布特征点追踪结果.
+   */
+  // 这里通过控制pub_count / (img_msg->header.stamp.toSec() -
+  // first_image_time))这个量，其中分子代表已发布的次数，分母则为当前帧与初始帧的时间差，
+  // 通过控制该比例即可较好地控制发布的频率。当然这种频率控制方法并不聪明
   if (round(1.0 * pub_count /
             (img_msg->header.stamp.toSec() - first_image_time)) <= FREQ) {
     PUB_THIS_FRAME = true;
     // reset the frequency control
+    /**
+    系统长时间运行后,从数值上来说,实际频率计算式的分子pub_count和分母img_msg->header.stamp.toSec()-first_image_time都较大,
+    这样系统对**瞬时发布速率变化不敏感**,容易造成瞬时数据拥堵(连续几帧都发布或连续几帧都不发布).为避免瞬时数据拥堵,
+    需要周期性重置计数器pub_count和first_image_time.实践上选择当实际频率十分接近给定频率时,重置计数器.
+     */
     if (abs(1.0 * pub_count /
                 (img_msg->header.stamp.toSec() - first_image_time) -
             FREQ) < 0.01 * FREQ) {
@@ -69,8 +78,12 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg) {
     }
   } else
     PUB_THIS_FRAME = false;
-
-  cv_bridge::CvImagePtr ptr;
+  /*******************************************************************************************/
+  /*******************************************************************************************/
+  //下边才是对图像的处理，需要注意的是即使不发布也是正常做光流追踪的！光流对图像的变化要求尽可能小
+  /*******************************************************************************************/
+  //将消息转换为cv图像
+  cv_bridge::CvImageConstPtr ptr;
   if (img_msg->encoding == "8UC1") {
     sensor_msgs::Image img;
     img.header = img_msg->header;
@@ -83,16 +96,14 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg) {
     ptr = cv_bridge::toCvCopy(img, sensor_msgs::image_encodings::MONO8);
   } else
     ptr = cv_bridge::toCvCopy(img_msg, sensor_msgs::image_encodings::MONO8);
-  ptr->header.stamp.fromSec(img_msg->header.stamp.toSec() -
-                            image_timestamp_bias);
+
   cv::Mat show_img = ptr->image;
-  ROS_INFO("image size: %d, %d", show_img.rows, show_img.cols);
-  // cv::imshow("In imag", show_img);
-  // cv::waitKey(1);
+  /*******************************************************************************************/
   TicToc t_r;
+  // 特征提取，如果是单目则提取特征并更新追踪信息，双目好像只更新了图像
   for (int i = 0; i < NUM_OF_CAM; i++) {
     ROS_DEBUG("processing camera %d", i);
-    if (i != 1 || !STEREO_TRACK)
+    if (i != 1 || !STEREO_TRACK) // 单目，实际上也只有单目
       trackerData[i].readImage(ptr->image.rowRange(ROW * i, ROW * (i + 1)),
                                img_msg->header.stamp.toSec());
     else {
@@ -108,7 +119,8 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg) {
     trackerData[i].showUndistortion("undistrotion_" + std::to_string(i));
 #endif
   }
-
+  /*******************************************************************************************/
+  // 更新id,这个特征点的id我仍然没有搞懂是怎么给出来的
   for (unsigned int i = 0;; i++) {
     bool completed = false;
     for (int j = 0; j < NUM_OF_CAM; j++)
@@ -117,7 +129,12 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg) {
     if (!completed)
       break;
   }
-
+  /*******************************************************************************************/
+  //发布
+  // 一帧图像所包含的所有数据都在这个feature_points中，其包括points项和channels项。
+  // points项传递cur帧所有特征点的归一化坐标，channels项则包含许多。
+  // channels[0]传递特征点的id序列，channels[1]和channels[2]传递cur帧特征点的像素坐标序列，
+  // channels[3]和channels[4]传递cur帧相对prev帧特征点沿x,y方向的像素移动速度
   if (PUB_THIS_FRAME) {
     pub_count++;
     sensor_msgs::PointCloudPtr feature_points(new sensor_msgs::PointCloud);
@@ -154,7 +171,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg) {
         }
       }
     }
-    
+    //
     feature_points->channels.push_back(id_of_point);
     feature_points->channels.push_back(u_of_point);
     feature_points->channels.push_back(v_of_point);
@@ -164,10 +181,10 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg) {
               ros::Time::now().toSec());
     // skip the first image; since no optical speed on frist image
     if (!init_pub) {
-      init_pub = true;
+      init_pub = 1;
     } else
       pub_img.publish(feature_points);
-
+    //特征的可视化
     if (SHOW_TRACK) {
       ptr = cv_bridge::cvtColor(ptr, sensor_msgs::image_encodings::BGR8);
       // cv::Mat stereo_img(ROW * NUM_OF_CAM, COL, CV_8UC3);
@@ -180,26 +197,8 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg) {
         for (unsigned int j = 0; j < trackerData[i].cur_pts.size(); j++) {
           double len =
               std::min(1.0, 1.0 * trackerData[i].track_cnt[j] / WINDOW_SIZE);
-          cv::circle(tmp_img, trackerData[i].cur_pts[j], 2,
+          cv::circle(tmp_img, trackerData[i].cur_pts[j], 5,
                      cv::Scalar(255 * (1 - len), 0, 255 * len), 2);
-          // draw speed line
-          /*
-          Vector2d tmp_cur_un_pts (trackerData[i].cur_un_pts[j].x,
-          trackerData[i].cur_un_pts[j].y); Vector2d tmp_pts_velocity
-          (trackerData[i].pts_velocity[j].x, trackerData[i].pts_velocity[j].y);
-          Vector3d tmp_prev_un_pts;
-          tmp_prev_un_pts.head(2) = tmp_cur_un_pts - 0.10 * tmp_pts_velocity;
-          tmp_prev_un_pts.z() = 1;
-          Vector2d tmp_prev_uv;
-          trackerData[i].m_camera->spaceToPlane(tmp_prev_un_pts, tmp_prev_uv);
-          cv::line(tmp_img, trackerData[i].cur_pts[j],
-          cv::Point2f(tmp_prev_uv.x(), tmp_prev_uv.y()), cv::Scalar(255 , 0, 0),
-          1 , 8, 0);
-          */
-          // char name[10];
-          // sprintf(name, "%d", trackerData[i].ids[j]);
-          // cv::putText(tmp_img, name, trackerData[i].cur_pts[j],
-          // cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0));
         }
       }
       // cv::imshow("vis", stereo_img);
@@ -208,20 +207,6 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg) {
     }
   }
   ROS_INFO("whole feature tracker processing costs: %f", t_r.toc());
-  cost_time_total = t_r.toc() + cost_time_total;
-  total_frame_idx++;
-  ROS_INFO("Average front-end cost time: %f",
-           cost_time_total / total_frame_idx);
-}
-
-template <typename T>
-T get_ros_parameter(ros::NodeHandle &nh, const std::string parameter_name,
-                    T &parameter, T default_val) {
-  nh.param<T>(parameter_name, parameter, default_val);
-  // ENABLE_SCREEN_PRINTF;
-  cout << "[Ros_parameter]: " << parameter_name << " ==> " << parameter
-       << std::endl;
-  return parameter;
 }
 
 int main(int argc, char **argv) {
@@ -229,13 +214,8 @@ int main(int argc, char **argv) {
   ros::NodeHandle n("~");
   ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME,
                                  ros::console::levels::Info);
-  // ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME,
-  // ros::console::levels::Debug);
-
-  cv::theRNG().state = 0; // Set random seed
   readParameters(n);
-  get_ros_parameter<std::string>(n, "image_topic", IMAGE_TOPIC,
-                                 "/camera/image_color");
+
   for (int i = 0; i < NUM_OF_CAM; i++)
     trackerData[i].readIntrinsicParameter(CAM_NAMES[i]);
 

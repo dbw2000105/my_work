@@ -6,9 +6,9 @@ project(my_work)
 ######################
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_TYPE "Release")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -std=c++17 -O3 -w")
-set (CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -std=c++14 -O3 -w")
+set (CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -23,7 +23,6 @@ find_package(catkin REQUIRED COMPONENTS
     std_msgs
     geometry_msgs
     nav_msgs
-    tf
     cv_bridge_1
     message_generation
     livox_ros_driver
@@ -43,8 +42,6 @@ find_package(PCL REQUIRED)
 
 find_package(PythonLibs REQUIRED)
 
-include_directories(${catkin_INCLUDE_DIRS} ${CERES_INCLUDE_DIRS})
-
 ######################
 ### Message generation
 ######################
@@ -61,6 +58,10 @@ generate_messages(
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 find_package(Eigen3)
+
+#####################
+### include files
+
 include_directories(
   ${catkin_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
@@ -69,32 +70,38 @@ include_directories(
   ./src/VIO
   ./src/LIO
   ./src/common
+  ./src/common/FOV_Checker
+  ./src/common/kd_tree
+  ./src/common/tools
+  ./src/common/utility
+  ./src/common/tools/r2live_sophus
 )
 
-catkin_package(
-  DEPENDS PCL
-)
+catkin_package(DEPENDS PCL)
 
 ######################
 ### src adding
 ######################
-file(GLOB visual_feature_files
+file(GLOB_RECURSE VISUAL_FEATURE_FILES
     "src/VIO/visual_feature/*.cpp"
     "src/VIO/visual_feature/camera_models/*.cc"
 )
 
-file(GLOB lio_files
-    "src/LIO/*.cpp"
-    "src/LIO/include/kd_tree/*.cpp"
-)
+file(GLOB_RECURSE LIO_FILES
+    "src/LIO/*.cpp"  #递归搜索src目录下的所有.cpp文件
+    "src/common/*.cpp"
 
+)
+list(REMOVE_ITEM LIO_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/LIO/feature_extract.cpp)
 # Visual Feature Tracker
-add_executable(feature_tracker ${visual_feature_files})
-target_link_libraries(feature_tracker ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES} dw)
+add_executable(feature_tracker ${VISUAL_FEATURE_FILES})
+target_link_libraries(feature_tracker ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES})
 
 ######################
 ### lidar odometry
 ######################
-# add_executable(fastlio_mapping src/laserMapping.cpp ${lio_files})
-# target_link_libraries(fastlio_mapping ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${PYTHON_LIBRARIES})
-# target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
+add_executable(lio_feat_extract src/LIO/feature_extract.cpp)
+target_link_libraries(lio_feat_extract ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+
+add_executable(fastlio_mapping ${LIO_FILES})
+target_link_libraries(fastlio_mapping ${catkin_LIBRARIES} ${PCL_LIBRARIES} dw)

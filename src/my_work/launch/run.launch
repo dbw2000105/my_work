@@ -1,26 +1,40 @@
 <launch>
   <arg name="project" default="my_work"/>
-	<arg name="rviz" default="true" />
-
-    <rosparam command="load" file="$(find my_work)/config/lio_config.yaml" />
-
-    <!-- <node pkg="fast_lio" type="fastlio_mapping" name="laserMapping" output="screen" />  -->
-
   <arg name="config_path" default = "$(find my_work)/config/filr_cam.yaml" />
 	<arg name="vins_path" default = "$(find my_work)/config/../" />
-    <rosparam command="load" file="$(find my_work)/config/lio_config.yaml" />
-    <node name="feature_tracker" pkg="my_work" type="feature_tracker" output="screen">
-        <param name="config_file" type="string" value="$(arg config_path)" />
-        <param name="vins_folder" type="string" value="$(arg vins_path)" />
-        <param name="image_topic" type="string" value="/camera/image_color"/>
-    </node>
+  <rosparam command="load" file="$(find my_work)/config/lio_config.yaml" />
 
-	<group if="$(arg rviz)">
-	<node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz" args="-d $(find my_work)/config/rviz/vins_rviz_config.rviz"/>
-	</group>
+  <param name="imu_topic" type="string" value="/livox/imu"/>
+  <param name="if_write_to_bag" type="int" value="0" />
+  <param name="record_bag_name" type="string" value="/home/ziv/kitti_bag/lic_record_bag/lic.bag" />
+  <param name="if_dump_log" type="int" value="0" />
+  <param name="acc_mul_G" type="int" value="0" />
+  <param name="lidar_drag_cam_tim" type="int" value="10" />
+  <param name="if_lidar_start_first" type="int" value="1" />
+
+  <!-- 特征提取 -->
+  <node pkg="my_work" type="lio_feat_extract" name="lio_feat_extract"  output="log"/>
+  <!-- 建图 -->
+  <group if="1">
+  <node name="fastlio_mapping" pkg="my_work" type="fastlio_mapping" output="screen">
+          <param name="config_file" type="string" value="$(arg config_path)" />
+          <param name="vins_folder" type="string" value="$(arg vins_path)" />
+  </node> 
+  </group>
+
+  <!-- 视觉特征追踪 -->
+  <node name="feature_tracker" pkg="my_work" type="feature_tracker" output="log">
+      <param name="config_file" type="string" value="$(arg config_path)" />
+      <param name="vins_folder" type="string" value="$(arg vins_path)" />
+  </node>
+
+  <arg name="rviz" default="1" />
+  <group if="$(arg rviz)">
+      <node name="rvizvisualisation" pkg="rviz" type="rviz" output="log" args="-d $(find my_work)/config/rviz/my_work.rviz" />
+  </group>
 
     <!-- Image conversion -->
-    <node pkg="image_transport" type="republish" name="$(arg project)_republish" args="compressed in:=/camera/image_color out:=/camera/image_color" output="screen" respawn="true"/>
+  <node pkg="image_transport" type="republish" name="my_work_republish" args="compressed in:=/camera/image_color raw out:=/camera/image_color " output="log" respawn="true"/>
 
 </launch>
 

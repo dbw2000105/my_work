@@ -1,12 +1,13 @@
 #ifndef COMMON_LIB_H
 #define COMMON_LIB_H
 
+#include <opencv/cv.h>
 #include <so3_math.h>
 #include <Eigen/Eigen>
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
-#include <r2live/States.h>
-#include <r2live/Pose6D.h>
+#include <my_work/States.h>
+#include <my_work/Pose6D.h>
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/PointCloud2.h>
@@ -16,12 +17,12 @@
 
 #include <tf/transform_broadcaster.h>
 #include <eigen_conversions/eigen_msg.h>
-#include "tools_color_printf.hpp"
-#include "tools_eigen.hpp"
+#include "tools/tools_color_printf.hpp"
+#include "tools/tools_eigen.hpp"
 #include <queue>
 #include <deque>
-#include "r2live_sophus/se3.hpp"
-#include "r2live_sophus/so3.hpp"
+#include "tools/r2live_sophus/se3.hpp"
+#include "tools/r2live_sophus/so3.hpp"
 // #define DEBUG_PRINT
 #define USE_ikdtree
 #define ESTIMATE_GRAVITY 0
@@ -46,7 +47,7 @@
 #define DEBUG_FILE_DIR(name) (std::string(std::string(ROOT_DIR) + "Log/" + name))
 // using vins_estimator = fast_lio;
 
-typedef r2live::Pose6D Pose6D;
+typedef my_work::Pose6D Pose6D;
 typedef pcl::PointXYZINormal PointType;
 typedef pcl::PointCloud<PointType> PointCloudXYZI;
 
@@ -168,12 +169,13 @@ struct Camera_Lidar_queue
     };
     ~Camera_Lidar_queue(){};
 
-    double imu_in(const double &in_time)
+    void imu_in(const double &in_time)
     {
-        if (m_first_imu_time < 0)
+        if (m_first_imu_time < 0) //初始化IMU时间
         {
             m_first_imu_time = in_time;
         }
+
         m_last_imu_time = std::max(in_time, m_last_imu_time);
         // m_last_imu_time = in_time;
     }
