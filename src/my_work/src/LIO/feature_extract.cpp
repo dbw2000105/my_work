@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
   case MID:
     printf("MID40\n");
     sub_points = n.subscribe("/livox/lidar", 1000, mid_handler,
-                             ros::TransportHints().tcpNoDelay());
+                             ros::TransportHints().tcpNoDelay()); //它创建了一个 ros::TransportHints 对象，并设置了 tcpNoDelay 选项为 true，表示在传输数据时禁用 Nagle 算法，从而减少网络延迟。
     // sub_points = n.subscribe("/livox/lidar_1LVDG1S006J5GZ3", 1000,
     // mid_handler);
     break;
@@ -700,29 +700,6 @@ void give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &types,
       }
     }
   }
-
-  // int last_surface = 0;
-  // for(uint i=0; i<plsize; i++)
-  // {
-  //   if(types[i].ftype==Poss_Plane || types[i].ftype==Real_Plane)
-  //   {
-  //     if(last_surface == 0)
-  //     {
-  //       pl_surf.push_back(pl[i]);
-  //       last_surface = 1;
-  //     }
-  //     else
-  //     {
-  //       last_surface = 0;
-  //     }
-
-  //   }
-  //   else if(types[i].ftype==Edge_Jump || types[i].ftype==Edge_Plane)
-  //   {
-  //     pl_corn.push_back(pl[i]);
-  //   }
-
-  // }
 
   int last_surface = -1;
   for (uint j = head; j < plsize; j++) {

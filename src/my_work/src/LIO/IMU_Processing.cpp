@@ -59,12 +59,13 @@ void ImuProcess::Reset() {
   cur_pcl_un_.reset(new PointCloudXYZI());
 }
 
+
 void ImuProcess::IMU_Initial(const MeasureGroup &meas, StatesGroup &state_inout,
                              int &N) {
   /** 1. initializing the gravity, gyro bias, acc and gyro covariance
    ** 2. normalize the acceleration measurenments to unit gravity **/
   ROS_INFO("IMU Initializing: %.1f %%", double(N) / MAX_INI_COUNT * 100);
-  Eigen::Vector3d cur_acc, cur_gyr;
+  Eigen::Vector3d cur_acc, cur_gyr; //当前帧的加速度和角速度
 
   if (b_first_frame_) {
     Reset();
@@ -73,8 +74,8 @@ void ImuProcess::IMU_Initial(const MeasureGroup &meas, StatesGroup &state_inout,
   }
 
   for (const auto &imu : meas.imu) {
-    const auto &imu_acc = imu->linear_acceleration;
-    const auto &gyr_acc = imu->angular_velocity;
+    const auto &imu_acc = imu->linear_acceleration; //加速度赋值
+    const auto &gyr_acc = imu->angular_velocity; //角速度赋值
     cur_acc << imu_acc.x, imu_acc.y, imu_acc.z;
     cur_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;
 
@@ -167,8 +168,8 @@ StatesGroup ImuProcess::imu_preintegration_fast_lio(
   std::unique_lock<std::mutex> lock(g_imu_premutex);
   StatesGroup state_inout = state_in;
   if (check_state(state_inout)) {
-    state_inout.display(state_inout, "state_inout");
-    state_in.display(state_in, "state_in");
+    StatesGroup::display(state_inout, "state_inout");
+    StatesGroup::display(state_in, "state_in");
   }
   Eigen::Vector3d acc_imu(0, 0, 0), angvel_avr(0, 0, 0), acc_avr(0, 0, 0),
       vel_imu(0, 0, 0), pos_imu(0, 0, 0);

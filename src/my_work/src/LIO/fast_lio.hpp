@@ -35,7 +35,7 @@
 #pragma once
 #include <omp.h>
 #include <mutex>
-#include <math.h>
+#include <cmath>
 #include <thread>
 #include <fstream>
 #include <csignal>
@@ -1542,9 +1542,6 @@ public:
                 s_plot6[time_log_counter] = readd_box_time;
                 time_log_counter++;
                 
-                // std::cout << "[ mapping ]: time: fov_check " << fov_check_time << " copy map " << copy_time << " readd: " << readd_time << " match " << match_time << " solve " << solve_time << "acquire: " << t4 - t3 << " map incre " << t5 - t4 << " total " << aver_time_consu << std::endl;
-                // fout_out << std::setw(10) << Measures.lidar_beg_time << " " << euler_cur.transpose()*57.3 << " " << g_lio_state.pos_end.transpose() << " " << g_lio_state.vel_end.transpose() \
-            // <<" "<<g_lio_state.bias_g.transpose()<<" "<<g_lio_state.bias_a.transpose()<< std::endl;
                 fout_out << std::setw(8) << laserCloudSelNum << " " << Measures.lidar_beg_time << " " << t2 - t0 << " " << match_time << " " << t5 - t3 << " " << t5 - t0 << std::endl;
             }
             status = ros::ok();

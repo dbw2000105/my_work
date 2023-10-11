@@ -3,6 +3,7 @@
 #include <utility/utility.h>
 #include "parameters.h"
 #include <tools_eigen.hpp>
+#include <utility>
 using namespace Eigen;
 
 struct IntegrationBase
@@ -43,9 +44,9 @@ struct IntegrationBase
     }
 
     IntegrationBase(const Eigen::Vector3d &_acc_0, const Eigen::Vector3d &_gyr_0,
-                    const Eigen::Vector3d &_linearized_ba, const Eigen::Vector3d &_linearized_bg)
+                    Eigen::Vector3d _linearized_ba, Eigen::Vector3d _linearized_bg)
         : acc_0{_acc_0}, gyr_0{_gyr_0}, linearized_acc{_acc_0}, linearized_gyr{_gyr_0},
-          linearized_ba{_linearized_ba}, linearized_bg{_linearized_bg},
+          linearized_ba{std::move(_linearized_ba)}, linearized_bg{std::move(_linearized_bg)},
             jacobian{Eigen::Matrix<double, 15, 15>::Identity()}, covariance{Eigen::Matrix<double, 15, 15>::Zero()},
           sum_dt{0.0}, delta_p{Eigen::Vector3d::Zero()}, delta_q{Eigen::Quaterniond::Identity()}, delta_v{Eigen::Vector3d::Zero()}
     {
@@ -226,12 +227,12 @@ struct IntegrationBase
     Eigen::Vector3d acc_1, gyr_1;
 
     const Eigen::Vector3d linearized_acc, linearized_gyr;
-    Eigen::Vector3d linearized_ba, linearized_bg;
+    Eigen::Vector3d linearized_ba, linearized_bg; //加速度零偏和角速度零偏
 
-    Eigen::Matrix<double, 15, 15> jacobian, covariance;
+    Eigen::Matrix<double, 15, 15> jacobian, covariance; //雅可比矩阵和协方差矩阵
     Eigen::Matrix<double, 15, 15> step_jacobian;
     Eigen::Matrix<double, 15, 18> step_V;
-    Eigen::Matrix<double, 18, 18> noise;
+    Eigen::Matrix<double, 18, 18> noise; //噪声矩阵
 
     double sum_dt;
     Eigen::Vector3d delta_p;
