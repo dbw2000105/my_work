@@ -25,7 +25,7 @@
 #include "tools/r2live_sophus/so3.hpp"
 // #define DEBUG_PRINT
 #define USE_ikdtree
-#define ESTIMATE_GRAVITY 0
+#define ESTIMATE_GRAVITY 1
 // #define USE_FOV_Checker
 
 #define printf_line std::cout << __FILE__ << " " << __LINE__ << std::endl;
@@ -151,7 +151,7 @@ struct Camera_Lidar_queue
     int m_if_dump_log = 1;
     rosbag::Bag m_bag_for_record;
 
-    std::deque<sensor_msgs::PointCloud2::ConstPtr> *m_liar_frame_buf = nullptr;
+    std::deque<sensor_msgs::PointCloud2::ConstPtr> *m_liar_frame_buf = nullptr; //雷达数据缓存
 
     void init_rosbag_for_recording()
     {
@@ -327,6 +327,71 @@ struct MeasureGroup // Lidar data and imu dates for the curent process
     std::deque<sensor_msgs::Imu::ConstPtr> imu;
 };
 
+// 别看他长，其实就是一个map类
+// key是 StateIDType 由 long long int typedef而来，把它当作int看就行
+// value是CAMState
+typedef long long int StateIDType;
+/*
+    * @brief CAMState Stored camera state in order to
+    *    form measurement model.
+    */
+struct CAMState
+{
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    // An unique identifier for the CAM state.
+    StateIDType id;
+
+    // Time when the state is recorded
+    double time;
+
+    // Orientation
+    // Take a vector from the world frame to the camera frame.
+    // Eigen::Vector4d orientation;
+    Eigen::Matrix3d orientation;
+
+    // Position of the camera frame in the world frame.
+    Eigen::Vector3d position;
+
+    // These two variables should have the same physical
+    // interpretation with `orientation` and `position`.
+    // There two variables are used to modify the measurement
+    // Jacobian matrices to make the observability matrix
+    // have proper null space.
+    // 使可观测性矩阵具有适当的零空间的旋转平移
+    Eigen::Matrix3d orientation_null;
+    Eigen::Vector3d position_null;
+
+    // Takes a vector from the cam0 frame to the cam1 frame.
+    // 两个相机间的外参
+    static Eigen::Isometry3d T_cam0_cam1;
+
+    CAMState() 
+    : id(0), time(0),
+    // orientation(Eigen::Vector4d(0, 0, 0, 1)),
+    orientation(Eigen::Matrix3d::Identity()), //TODO 这里目前用的旋转矩阵，如果后面有问题，可能需要改回四元数的形式
+    position(Eigen::Vector3d::Zero()),
+    orientation_null(Eigen::Matrix3d::Identity()),
+    // orientation_null(Eigen::Vector4d(0, 0, 0, 1)),
+    position_null(Eigen::Vector3d(0, 0, 0))
+    {
+
+    }
+
+    CAMState(const StateIDType &new_id)
+    : id(new_id), time(0),
+    orientation(Eigen::Matrix3d::Identity()), 
+    position(Eigen::Vector3d::Zero()),
+    orientation_null(Eigen::Matrix3d::Identity()),
+    position_null(Eigen::Vector3d::Zero())
+    {
+
+    }
+};
+typedef std::map<StateIDType, CAMState,
+    std::less<>, Eigen::aligned_allocator< std::pair<const StateIDType, CAMState>>>
+    CamStateServer;
+
 struct StatesGroup
 {
     StatesGroup()
@@ -339,10 +404,10 @@ struct StatesGroup
         this->gravity = Eigen::Vector3d(0.0, 0.0, 9.805);
         this->cov = Eigen::Matrix<double, DIM_OF_STATES, DIM_OF_STATES>::Identity() * INIT_COV;
         this->last_update_time = 0;
+        this->id = 0;
     };
     ~StatesGroup()
-    {
-    }
+    = default;
 
     StatesGroup(const StatesGroup &b)
     {
@@ -354,6 +419,7 @@ struct StatesGroup
         this->gravity = b.gravity;
         this->cov = b.cov;
         this->last_update_time = b.last_update_time;
+        this->id = b.id;
     };
 
     StatesGroup &operator=(const StatesGroup &b)
@@ -363,6 +429,7 @@ struct StatesGroup
         this->vel_end = b.vel_end;
         this->bias_g = b.bias_g;
         this->bias_a = b.bias_a;
+        this->id = b.id;
 #if ESTIMATE_GRAVITY
         this->gravity = b.gravity;
 #else
@@ -436,6 +503,7 @@ struct StatesGroup
     Eigen::Vector3d gravity;                                 // the estimated gravity acceleration
     Eigen::Matrix<double, DIM_OF_STATES, DIM_OF_STATES> cov; // states covariance
     double last_update_time = 0;
+    long long int id;
 
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -472,4 +540,116 @@ auto set_pose6d(const double t, const Eigen::Matrix<T, 3, 1> &a, const Eigen::Ma
     return std::move(rot_kp);
 }
 
+/**
+ *  @brief 反对称矩阵
+ *  @note Performs the operation:
+ *  w   ->  [  0 -w3  w2]
+ *          [ w3   0 -w1]
+ *          [-w2  w1   0]
+ */
+inline Eigen::Matrix3d skewSymmetric(const Eigen::Vector3d &w)
+{
+    Eigen::Matrix3d w_hat;
+    w_hat(0, 0) = 0;
+    w_hat(0, 1) = -w(2);
+    w_hat(0, 2) = w(1);
+    w_hat(1, 0) = w(2);
+    w_hat(1, 1) = 0;
+    w_hat(1, 2) = -w(0);
+    w_hat(2, 0) = -w(1);
+    w_hat(2, 1) = w(0);
+    w_hat(2, 2) = 0;
+    return w_hat;
+}
+
+/**
+ * @brief 标准化四元数
+ */
+inline void quaternionNormalize(Eigen::Vector4d &q)
+{
+    double norm = q.norm();
+    q = q / norm;
+}
+
+/**
+ * @brief 四元数转旋转矩阵 jpl
+ * Convert a quaternion to the corresponding rotation matrix
+ * @note Pay attention to the convention used. The function follows the
+ *    conversion in "Indirect Kalman Filter for 3D Attitude Estimation:
+ *    A Tutorial for Quaternion Algebra", Equation (62).
+ *
+ *    The input quaternion should be in the form
+ *      [q1, q2, q3, q4(scalar)]^T
+ */
+inline Eigen::Matrix3d quaternionToRotation(
+    const Eigen::Vector4d &q)
+{
+    const Eigen::Vector3d &q_vec = q.block(0, 0, 3, 1);
+    const double &q4 = q(3);
+    Eigen::Matrix3d R =
+        (2 * q4 * q4 - 1) * Eigen::Matrix3d::Identity() -
+        2 * q4 * skewSymmetric(q_vec) +
+        2 * q_vec * q_vec.transpose();
+    // TODO: Is it necessary to use the approximation equation
+    //     (Equation (70)) when the rotation angle is small?
+    return R;
+}
+
+/**
+ * @brief 旋转矩阵转四元数 没在论文里找到，这里不用看，直接用！
+ * Convert a rotation matrix to a quaternion.
+ * @note Pay attention to the convention used. The function follows the
+ *    conversion in "Indirect Kalman Filter for 3D Attitude Estimation:
+ *    A Tutorial for Quaternion Algebra", Equation (78).
+ *
+ *    The input quaternion should be in the form
+ *      [q1, q2, q3, q4(scalar)]^T
+ */
+inline Eigen::Vector4d rotationToQuaternion(
+    const Eigen::Matrix3d &R)
+{
+    Eigen::Vector4d score;
+    score(0) = R(0, 0);
+    score(1) = R(1, 1);
+    score(2) = R(2, 2);
+    score(3) = R.trace();
+
+    int max_row = 0, max_col = 0;
+    score.maxCoeff(&max_row, &max_col);
+
+    Eigen::Vector4d q = Eigen::Vector4d::Zero();
+    if (max_row == 0)
+    {
+        q(0) = std::sqrt(1 + 2 * R(0, 0) - R.trace()) / 2.0;
+        q(1) = (R(0, 1) + R(1, 0)) / (4 * q(0));
+        q(2) = (R(0, 2) + R(2, 0)) / (4 * q(0));
+        q(3) = (R(1, 2) - R(2, 1)) / (4 * q(0));
+    }
+    else if (max_row == 1)
+    {
+        q(1) = std::sqrt(1 + 2 * R(1, 1) - R.trace()) / 2.0;
+        q(0) = (R(0, 1) + R(1, 0)) / (4 * q(1));
+        q(2) = (R(1, 2) + R(2, 1)) / (4 * q(1));
+        q(3) = (R(2, 0) - R(0, 2)) / (4 * q(1));
+    }
+    else if (max_row == 2)
+    {
+        q(2) = std::sqrt(1 + 2 * R(2, 2) - R.trace()) / 2.0;
+        q(0) = (R(0, 2) + R(2, 0)) / (4 * q(2));
+        q(1) = (R(1, 2) + R(2, 1)) / (4 * q(2));
+        q(3) = (R(0, 1) - R(1, 0)) / (4 * q(2));
+    }
+    else
+    {
+        q(3) = std::sqrt(1 + R.trace()) / 2.0;
+        q(0) = (R(1, 2) - R(2, 1)) / (4 * q(3));
+        q(1) = (R(2, 0) - R(0, 2)) / (4 * q(3));
+        q(2) = (R(0, 1) - R(1, 0)) / (4 * q(3));
+    }
+
+    if (q(3) < 0)
+        q = -q;
+    quaternionNormalize(q);
+    return q;
+}
 #endif
