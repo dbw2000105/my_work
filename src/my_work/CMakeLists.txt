@@ -58,6 +58,7 @@ generate_messages(
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 find_package(Eigen3)
+find_package(SuiteSparse REQUIRED)
 
 #####################
 ### include files
@@ -67,6 +68,7 @@ include_directories(
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
   ${PYTHON_INCLUDE_DIRS}
+  ${SUITESPARSE_INCLUDE_DIRS}
   ./src/VIO
   ./src/LIO
   ./src/common
@@ -77,7 +79,8 @@ include_directories(
   ./src/common/tools/r2live_sophus
 )
 
-catkin_package(DEPENDS PCL)
+catkin_package(DEPENDS EIGEN3 PCL SUITESPARSE
+   )
 
 ######################
 ### src adding
@@ -104,4 +107,4 @@ add_executable(lio_feat_extract src/LIO/feature_extract.cpp)
 target_link_libraries(lio_feat_extract ${catkin_LIBRARIES} ${PCL_LIBRARIES})
 
 add_executable(fastlio_mapping ${LIO_FILES})
-target_link_libraries(fastlio_mapping ${catkin_LIBRARIES} ${PCL_LIBRARIES} dw)
+target_link_libraries(fastlio_mapping ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${SUITESPARSE_LIBRARIES})

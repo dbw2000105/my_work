@@ -4,12 +4,12 @@
 
 #include <std_msgs/Header.h>
 #include <std_msgs/Float32.h>
+#include "feature.hpp"
 
-#include <unordered_map>
-#include <queue>
 #include <opencv2/core/eigen.hpp>
 #include "common_lib.h"
 
+// #include "Eigen/SPQRSupport"
 /*
     Estimator 状态估计器
     IMU预积分，图像IMU融合的初始化和状态估计，重定位
@@ -135,26 +135,11 @@ public:
     // 图像帧中保存了图像帧的特征点、时间戳、位姿Rt，预积分对象pre_integration，是否是关键帧。
     map<double, ImageFrame> m_all_image_frame;
     IntegrationBase *tmp_pre_integration;
-
-    // relocalization variable
-    // 重定位所需的变量
-    // bool relocalization_info;
-    // double relo_frame_stamp;
-    // double relo_frame_index;
-    // int relo_frame_local_index;
-    // vector<Vector3d> match_points;
-    // double relo_Pose[SIZE_POSE];
-    // Matrix3d drift_correct_r;
-    // Vector3d drift_correct_t;
-    // Vector3d prev_relo_t;
-    // Matrix3d prev_relo_r;
-    // Vector3d relo_relative_t;
-    // Quaterniond relo_relative_q;
-    // double relo_relative_yaw;
 };
 
 struct StateServer
     {
+        // IMUState imu_state;
         StatesGroup imu_state;
         // 别看他长，其实就是一个map类
         // key是 StateIDType 由 long long int typedef而来，把它当作int看就行
@@ -168,6 +153,16 @@ struct StateServer
 //msckf
 // Measurement update
 void stateAugmentation(const double &time, StateServer &state_server);
-void addFeatureObservations(const sensor_msgs::PointCloudConstPtr &msg);
-void removeLostFeatures();
-void pruneCamStateBuffer();
+void addFeatureObservations(const sensor_msgs::PointCloudConstPtr &o_msg, StateServer &state_server);
+void removeLostFeatures(StateServer &state_server);
+void pruneCamStateBuffer(StateServer &state_server);
+void featureJacobian(const FeatureIDType &feature_id, const std::vector<StateIDType> &cam_state_ids, Eigen::MatrixXd &H_x, Eigen::VectorXd &r, StateServer &state_server);
+void measurementUpdate(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, StateServer &state_server);
+bool gatingTest(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, const int &dof,StateServer &state_server);
+void measurementJacobian(const StateIDType &cam_state_id,
+    const FeatureIDType &feature_id,
+    Eigen::Matrix<double, 4, 6> &H_x,
+    Eigen::Matrix<double, 4, 3> &H_f,
+    Eigen::Vector4d &r, StateServer &state_server);
+
+void findRedundantCamStates(vector<StateIDType> &rm_cam_state_ids, StateServer &state_server);

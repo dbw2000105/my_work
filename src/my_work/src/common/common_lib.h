@@ -327,6 +327,96 @@ struct MeasureGroup // Lidar data and imu dates for the curent process
     std::deque<sensor_msgs::Imu::ConstPtr> imu;
 };
 
+/*
+ * @brief IMUState State for IMU
+ */
+struct IMUState
+{
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    typedef long long int StateIDType;
+
+    // An unique identifier for the IMU state.
+    StateIDType id;
+
+    // id for next IMU state
+    static StateIDType next_id;
+
+    // Time when the state is recorded
+    double time;
+
+    // Orientation
+    // Take a vector from the world frame to
+    // the IMU (body) frame.
+    // Rbw
+    Eigen::Vector4d orientation;
+
+    // Position of the IMU (body) frame
+    // in the world frame.
+    // twb
+    Eigen::Vector3d position;
+
+    // Velocity of the IMU (body) frame
+    // in the world frame.
+    Eigen::Vector3d velocity;
+
+    // Bias for measured angular velocity
+    // and acceleration.
+    Eigen::Vector3d gyro_bias;
+    Eigen::Vector3d acc_bias;
+
+    // Transformation between the IMU and the
+    Eigen::Matrix3d R_imu_cam0;
+    Eigen::Vector3d t_cam0_imu;
+
+    // These three variables should have the same physical
+    // interpretation with `orientation`, `position`, and
+    // `velocity`. There three variables are used to modify
+    // the transition matrices to make the observability matrix
+    // have proper null space.
+    // 用于使可观测性矩阵具有适当的零空间
+    Eigen::Vector4d orientation_null;
+    Eigen::Vector3d position_null;
+    Eigen::Vector3d velocity_null;
+
+    // Process noise
+    static double gyro_noise;
+    static double acc_noise;
+    static double gyro_bias_noise;
+    static double acc_bias_noise;
+
+    // Gravity vector in the world frame
+    static Eigen::Vector3d gravity;
+
+    // Transformation offset from the IMU frame to
+    // the body frame. The transformation takes a
+    // vector from the IMU frame to the body frame.
+    // The z axis of the body frame should point upwards.
+    // Normally, this transform should be identity.
+    static Eigen::Isometry3d T_imu_body;
+
+    IMUState() 
+        : id(0), time(0),
+        orientation(Eigen::Vector4d(0, 0, 0, 1)),
+        position(Eigen::Vector3d::Zero()),
+        velocity(Eigen::Vector3d::Zero()),
+        gyro_bias(Eigen::Vector3d::Zero()),
+        acc_bias(Eigen::Vector3d::Zero()),
+        orientation_null(Eigen::Vector4d(0, 0, 0, 1)),
+        position_null(Eigen::Vector3d::Zero()),
+        velocity_null(Eigen::Vector3d::Zero()) {}
+
+    IMUState(const StateIDType &new_id)
+        : id(new_id), time(0),
+        orientation(Eigen::Vector4d(0, 0, 0, 1)),
+        position(Eigen::Vector3d::Zero()),
+        velocity(Eigen::Vector3d::Zero()),
+        gyro_bias(Eigen::Vector3d::Zero()),
+        acc_bias(Eigen::Vector3d::Zero()),
+        orientation_null(Eigen::Vector4d(0, 0, 0, 1)),
+        position_null(Eigen::Vector3d::Zero()),
+        velocity_null(Eigen::Vector3d::Zero()) {}
+};
+
 // 别看他长，其实就是一个map类
 // key是 StateIDType 由 long long int typedef而来，把它当作int看就行
 // value是CAMState
@@ -364,7 +454,7 @@ struct CAMState
 
     // Takes a vector from the cam0 frame to the cam1 frame.
     // 两个相机间的外参
-    static Eigen::Isometry3d T_cam0_cam1;
+    // static Eigen::Isometry3d T_cam0_cam1;
 
     CAMState() 
     : id(0), time(0),
@@ -378,7 +468,7 @@ struct CAMState
 
     }
 
-    CAMState(const StateIDType &new_id)
+    explicit CAMState(const StateIDType &new_id)
     : id(new_id), time(0),
     orientation(Eigen::Matrix3d::Identity()), 
     position(Eigen::Vector3d::Zero()),
@@ -504,6 +594,9 @@ struct StatesGroup
     Eigen::Matrix<double, DIM_OF_STATES, DIM_OF_STATES> cov; // states covariance
     double last_update_time = 0;
     long long int id;
+      // Transformation between the IMU and the
+    Eigen::Matrix3d R_imu_cam0;
+    Eigen::Vector3d t_cam0_imu;
 
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -652,4 +745,72 @@ inline Eigen::Vector4d rotationToQuaternion(
     quaternionNormalize(q);
     return q;
 }
+
+/**
+ * @brief 李代数转四元数，小量
+ * Convert the vector part of a quaternion to a
+ *    full quaternion.
+ * @note This function is useful to convert delta quaternion
+ *    which is usually a 3x1 vector to a full quaternion.
+ *    For more details, check Section 3.2 "Kalman Filter Update" in
+ *    "Indirect Kalman Filter for 3D Attitude Estimation:
+ *    A Tutorial for quaternion Algebra".
+ */
+inline Eigen::Vector4d smallAngleQuaternion(
+    const Eigen::Vector3d &dtheta)
+{
+    // δq ~= (1/2δθ, 1)
+    Eigen::Vector3d dq = dtheta / 2.0;
+    Eigen::Vector4d q;
+    double dq_square_norm = dq.squaredNorm();
+
+    // 这么做就是为了符合四元数的定义
+    // q(3)的平方+q.head<3>()的平方和的和是1
+    if (dq_square_norm <= 1)
+    {
+        q.head<3>() = dq;
+        q(3) = std::sqrt(1 - dq_square_norm);
+    }
+    else
+    {
+        q.head<3>() = dq;
+        q(3) = 1;
+        q = q / std::sqrt(1 + dq_square_norm);
+    }
+
+    return q;
+}
+
+/**
+ * @brief Perform q1 * q2
+ * Indirect Kalman Filter for 3D Attitude Estimation 公式8
+ * jpl四元数乘法
+ */
+inline Eigen::Vector4d quaternionMultiplication(
+    const Eigen::Vector4d &q1,
+    const Eigen::Vector4d &q2)
+{
+    Eigen::Matrix4d L;
+    L(0, 0) = q1(3);
+    L(0, 1) = q1(2);
+    L(0, 2) = -q1(1);
+    L(0, 3) = q1(0);
+    L(1, 0) = -q1(2);
+    L(1, 1) = q1(3);
+    L(1, 2) = q1(0);
+    L(1, 3) = q1(1);
+    L(2, 0) = q1(1);
+    L(2, 1) = -q1(0);
+    L(2, 2) = q1(3);
+    L(2, 3) = q1(2);
+    L(3, 0) = -q1(0);
+    L(3, 1) = -q1(1);
+    L(3, 2) = -q1(2);
+    L(3, 3) = q1(3);
+
+    Eigen::Vector4d q = L * q2;
+    quaternionNormalize(q);
+    return q;
+}
+
 #endif

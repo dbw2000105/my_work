@@ -1,4 +1,6 @@
+#include <iomanip>
 #include <iostream>
+#include <memory>
 #include <stdio.h>
 #include <queue>
 #include <map>
@@ -9,6 +11,7 @@
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
 
+#include "CameraMeasurement.h"
 #include "common_lib.h"
 #include "estimator.h"
 #include "parameters.h"
@@ -27,6 +30,9 @@ double current_time = -1;
 queue<sensor_msgs::ImuConstPtr> imu_buf;
 queue<sensor_msgs::PointCloudConstPtr> feature_buf;
 queue<sensor_msgs::PointCloudConstPtr> relo_buf;
+// queue<CameraMeasurementPtr> msckf_feature_buf;
+// CameraMeasurementPtr msckf_feature_msg;
+
 int sum_of_wait = 0;
 
 // 互斥量
@@ -97,17 +103,17 @@ void imu_callback(const sensor_msgs::ImuConstPtr &_imu_msg){
 
 // feature回调函数，将feature_msg放入feature_buf
 void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg){
-    if (!init_feature)
-    {
-        //skip the first detected feature, which doesn't contain optical flow speed
-        init_feature = 1;
-        return;
-    }
+  if (!init_feature)
+  {
+      //skip the first detected feature, which doesn't contain optical flow speed
+      init_feature = 1;
+      return;
+  }
 
-    m_buf.lock();
-    feature_buf.push(feature_msg);
-    m_buf.unlock();
-    con.notify_one();
+  m_buf.lock();
+  feature_buf.push(feature_msg);
+  m_buf.unlock();
+  con.notify_one();
 }
 
 // restart回调函数，收到restart时清空feature_buf和imu_buf，估计器重置，时间重置
@@ -200,16 +206,16 @@ std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointC
     return measurements;
 }
 //将全局状态赋值给msckf状态，不改变原先id的值
-inline void system_state_transform(){
-  state_server.imu_state.rot_end = g_lio_state.rot_end;
-  state_server.imu_state.pos_end = g_lio_state.pos_end;
-  state_server.imu_state.vel_end = g_lio_state.vel_end;
-  state_server.imu_state.bias_a = g_lio_state.bias_a;
-  state_server.imu_state.bias_g = g_lio_state.bias_g;
-  // state_server.imu_state.cov = g_lio_state.cov;
-  state_server.state_cov.block<18, 18>(0, 0) = g_lio_state.cov;
-  state_server.imu_state.last_update_time = g_lio_state.last_update_time;
-  state_server.imu_state.gravity = g_lio_state.gravity;
+inline void system_state_transform(StatesGroup &global_state){
+  state_server.imu_state.rot_end = global_state.rot_end;
+  state_server.imu_state.pos_end = global_state.pos_end;
+  state_server.imu_state.vel_end = global_state.vel_end;
+  state_server.imu_state.bias_a = global_state.bias_a;
+  state_server.imu_state.bias_g = global_state.bias_g;
+  // state_server.imu_state.cov = global_state.cov;
+  state_server.state_cov.block<18, 18>(0, 0) = global_state.cov;
+  state_server.imu_state.last_update_time = global_state.last_update_time;
+  state_server.imu_state.gravity = global_state.gravity;
 }
 
 void process(){
@@ -217,60 +223,105 @@ void process(){
   G.setZero();
   H_T_H.setZero();
   I_STATE.setIdentity();
-  std::shared_ptr<ImuProcess> p_imu(new ImuProcess());
-  state_server.state_cov = Eigen::MatrixXd::Identity(DIM_OF_STATES, DIM_OF_STATES);
+  std::shared_ptr<ImuProcess> p_imu(new ImuProcess()); //存储IMU的数据
+  //sensor_msgs::PointCloudConstPtr 到 CameraMeasurementConstPtr 数据格式的转换
+
+  state_server.state_cov = Eigen::MatrixXd::Zero(21, 21);
   // StateServer state_server; //存储IMU和cam的数据
   g_camera_lidar_queue.m_if_lidar_can_start =
       g_camera_lidar_queue.m_if_lidar_start_first; //雷达首先启动
 
   while(true){
-        //每个vector中有一个pair，pair中的first是IMU数据，second是图像数据，另外每一个pair中first是一个vector，里面存储的是IMU数据，second是一个PointCloudConstPtr
-        std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>> measurements;
-        measurements = getMeasurements(); //每次始终拿到一个测量，包括一帧IMU数据和一帧图像数据
-        if (measurements.empty()){
-            continue;
-        }
-        // std::cout << "angular_velocity: " << measurements[0].first.back()->angular_velocity<< std::endl; 
-        m_estimator.lock();
-        //; 每次循环都会给设置一个负无穷大的数
-        g_camera_lidar_queue.m_last_visual_time = -3e8;
-
-        // TicToc t_s;
-        //; 遍历测量到的所有camera和imu数据
-        for (auto &measurement : measurements){
-            // 对应这段的img data
-            auto img_msg = measurement.second;
-      
-            //?-------- 增加开始 ----------
-            int if_camera_can_update = 1;
-            //; cam_update_tim ：当前帧的图像时间
-            double cam_update_tim = img_msg->header.stamp.toSec() + estimator.td;
-            
-            // ANCHOR - determine if update of not.
-            //; 此时已经开始了LIO线程，所以这个一定成立
-            if (estimator.m_fast_lio_instance != nullptr){
-                g_camera_lidar_queue.m_camera_imu_td = estimator.td; //todo这里表示当前相机帧和IMU帧的时间差？
-                //; 更新最新的图片时间
-                g_camera_lidar_queue.m_last_visual_time = img_msg->header.stamp.toSec();
-                //; 判断是否能够处理这一帧的camera数据，跟lidar的判断是一样的
-                while (g_camera_lidar_queue.if_camera_can_process() == false){
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-                //! 注意：这里锁住了lio，也就是vio运行的时候lio是被锁住的！这样保证vio运行的时候， lio无法运行
-                lock_lio(estimator);
-                
-                // t_s.tic();
-
-                *p_imu = *(estimator.m_fast_lio_instance->m_imu_process);  //; IMU处理的类，相当于拿到了LIO中处理好的IMU的数据
-                // std::cout << "p_imu->angvel_last: " << p_imu->angvel_last << std::endl;
-            }
-          //相机状态扩增  
-          system_state_transform();
-          stateAugmentation(measurements.back().second->header.stamp.toSec(), state_server);
-          unlock_lio(estimator);
-        }
-      m_estimator.unlock();
+    //每个vector中有一个pair，pair中的first是IMU数据，second是图像数据，另外每一个pair中first是一个vector，里面存储的是IMU数据，second是一个PointCloudConstPtr
+    std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>> measurements;
+    measurements = getMeasurements(); //每次始终拿到一个测量，包括一帧IMU数据和一帧图像数据
+    if (measurements.empty()){
+        continue;
     }
+    // std::cout << "angular_velocity: " << measurements[0].first.back()->angular_velocity<< std::endl; 
+    m_estimator.lock();
+    //; 每次循环都会给设置一个负无穷大的数
+    g_camera_lidar_queue.m_last_visual_time = -3e8;
+
+    // TicToc t_s;
+    //; 遍历测量到的所有camera和imu数据
+    for (auto &measurement : measurements){
+      // 对应这段的img data
+      auto img_msg = measurement.second;
+
+      //?-------- 增加开始 ----------
+      int if_camera_can_update = 1;
+      //; cam_update_tim ：当前帧的图像时间
+      double cam_update_tim = img_msg->header.stamp.toSec() + estimator.td;
+      
+      // ANCHOR - determine if update of not.
+      //; 此时已经开始了LIO线程，所以这个一定成立
+      if (estimator.m_fast_lio_instance != nullptr){
+        g_camera_lidar_queue.m_camera_imu_td = estimator.td; //todo这里表示当前相机帧和IMU帧的时间差？
+        //; 更新最新的图片时间
+        g_camera_lidar_queue.m_last_visual_time = img_msg->header.stamp.toSec();
+        //; 判断是否能够处理这一帧的camera数据，跟lidar的判断是一样的
+        while (g_camera_lidar_queue.if_camera_can_process() == false){
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        //! 注意：这里锁住了lio，也就是vio运行的时候lio是被锁住的！这样保证vio运行的时候， lio无法运行
+        lock_lio(estimator);
+                      // t_s.tic();
+        // *p_imu = *(estimator.m_fast_lio_instance->m_imu_process);  //; IMU处理的类，相当于拿到了LIO中处理好的IMU的数据
+        // std::cout << "p_imu->angvel_last: " << p_imu->angvel_last << std::endl;
+      }
+                //? ------------ 增加开始 -----------------
+      std::deque<sensor_msgs::Imu::ConstPtr> imu_queue;
+      int total_IMU_cnt = 0;
+      int acc_IMU_cnt = 0;
+      //; 下面就是在统计这些imu数据中在上次lio状态更新时刻之后的那些imu数据
+      for (auto &imu_msg : measurement.first){
+        total_IMU_cnt++;
+        //; 如果这帧IMU数据在上次状态更新之后
+        //! g_lio_state.last_update_time : 在lio中对应lidar点云的最后一个点的时间， 在vio中对应图像的时间
+        if (imu_msg->header.stamp.toSec() > g_lio_state.last_update_time){
+            acc_IMU_cnt++;
+            imu_queue.push_back(imu_msg);
+        }
+      }
+      StatesGroup state_aft_integration = g_lio_state;  //; 把状态赋值给局部变量：积分后的状态变量
+      int esikf_update_valid = false;
+      if (!imu_queue.empty()){
+        //; 正常情况下这个条件不会满足
+        if (g_lio_state.last_update_time == 0){
+            g_lio_state.last_update_time = imu_queue.front()->header.stamp.toSec();
+        }
+        
+        //; start_dt < 0, end_dt < 0
+        double start_dt = g_lio_state.last_update_time - imu_queue.front()->header.stamp.toSec();
+        double end_dt = cam_update_tim - imu_queue.back()->header.stamp.toSec();  //; 图像时间应该是<最后一个IMU时间的，所以这里也是负数
+        esikf_update_valid = true;
+
+        //; 注意：只要历史上收到过一帧lidar数据，m_if_have_lidar_data就会被置位为1。
+        if (g_camera_lidar_queue.m_if_have_lidar_data && (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)){
+          //; 如果有激光雷达的数据，那么利用激光雷达算出来的上一次的全局位姿进行积分，得到此时的一个IMU计算的全局位姿
+          *p_imu = *(estimator.m_fast_lio_instance->m_imu_process);
+          //! 这里应该有点问题啊，lidar+imu是前面多取一个IMU；而image+imu是后面多取一个IMU。现在传入image的IMU给lidar的算，
+          //!     恰好错位了一个IMU的位置
+          //; 注意这里，得到的state_aft_intergration是最新的预测位姿，它的last_update_time也更新了，
+          //;  但是传入的g_lio_state是常量！不会改变！
+          state_aft_integration = p_imu->imu_integration(g_lio_state, imu_queue, 0, cam_update_tim - imu_queue.back()->header.stamp.toSec());
+        }
+      }
+      system_state_transform(state_aft_integration);
+      //3. 相机状态扩增  
+      stateAugmentation(measurements.back().second->header.stamp.toSec(), state_server);
+      //4. 添加新的观测
+      addFeatureObservations(measurements.back().second, state_server);
+      //5. 使用不再跟踪上的点来更新
+      removeLostFeatures(state_server);
+      //6. 当cam状态数达到最大值时，挑出若干cam状态待删除
+      //并基于能被2帧以上这些cam观测到的feature进行MSCKF测量更新
+      pruneCamStateBuffer(state_server);
+      unlock_lio(estimator);
+    }
+    m_estimator.unlock();
+  }
 }
 
 int main(int argc, char **argv){

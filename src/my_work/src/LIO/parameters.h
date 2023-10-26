@@ -39,6 +39,7 @@ extern double TR;
 extern int ESTIMATE_TD;
 extern int ROLLING_SHUTTER;
 extern double ROW, COL;
+extern std::map<int, double> chi_squared_test_table; //卡方检验表
 
 
 void readParameters(ros::NodeHandle &n);

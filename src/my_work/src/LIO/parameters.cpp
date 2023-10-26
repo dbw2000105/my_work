@@ -1,5 +1,5 @@
 #include "parameters.h"
-
+#include <boost/math/distributions/chi_squared.hpp>
 double INIT_DEPTH;
 double MIN_PARALLAX;
 // double ACC_N = 0.1;
@@ -30,6 +30,8 @@ std::string VINS_RESULT_PATH;
 std::string IMU_TOPIC;
 double ROW, COL;
 double TD, TR;
+std::map<int, double> chi_squared_test_table; //卡方检验表
+
 
 template <typename T>
 T readParam(ros::NodeHandle &n, std::string name)
@@ -142,6 +144,13 @@ void readParameters(ros::NodeHandle &n)
     {
         TR = 0;
     }
-    
+        // 卡方检验表
+    // Initialize the chi squared test table with confidence
+    // level 0.95.
+    for (int i = 1; i < 100; ++i)
+    {
+        boost::math::chi_squared chi_squared_dist(i);
+        chi_squared_test_table[i] = boost::math::quantile(chi_squared_dist, 0.05);
+    }
     fsSettings.release();
 }

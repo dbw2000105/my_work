@@ -126,7 +126,7 @@ void ImuProcess::lic_state_propagate(const MeasureGroup &meas,
   // cout << ANSI_COLOR_GREEN_BOLD << "End_pose_dt =  " << end_pose_dt <<
   // ANSI_COLOR_RESET << endl;
 
-  state_inout = imu_preintegration(state_inout, v_imu, 1, end_pose_dt);
+  state_inout = imu_integration(state_inout, v_imu, 1, end_pose_dt);
   last_imu_ = meas.imu.back();
 }
 
@@ -356,7 +356,7 @@ StatesGroup ImuProcess::imu_preintegration_fast_lio(
 }
 
 StatesGroup
-ImuProcess::imu_preintegration(const StatesGroup &state_in,
+ImuProcess::imu_integration(const StatesGroup &state_in,
                                std::deque<sensor_msgs::Imu::ConstPtr> &v_imu,
                                int if_multiply_g, double end_pose_dt) {
   std::unique_lock<std::mutex> lock(g_imu_premutex);

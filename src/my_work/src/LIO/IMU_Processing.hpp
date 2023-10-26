@@ -55,7 +55,7 @@ class ImuProcess
   void lic_state_propagate(const MeasureGroup &meas, StatesGroup &state_inout);
   void lic_point_cloud_undistort(const MeasureGroup &meas,  const StatesGroup &state_inout, PointCloudXYZI &pcl_out);
   StatesGroup imu_preintegration_fast_lio(const StatesGroup & state_inout, std::deque<sensor_msgs::Imu::ConstPtr> & v_imu, int if_multiply_g = 1, double end_pose_dt = 0);
-  StatesGroup imu_preintegration(const StatesGroup & state_inout, std::deque<sensor_msgs::Imu::ConstPtr> & v_imu, int if_multiply_g = 1, double end_pose_dt = 0);
+  StatesGroup imu_integration(const StatesGroup & state_inout, std::deque<sensor_msgs::Imu::ConstPtr> & v_imu, int if_multiply_g = 1, double end_pose_dt = 0);
   ros::NodeHandle nh;
 
   void Integrate(const sensor_msgs::ImuConstPtr &imu);
