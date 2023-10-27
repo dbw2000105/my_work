@@ -107,4 +107,4 @@ add_executable(lio_feat_extract src/LIO/feature_extract.cpp)
 target_link_libraries(lio_feat_extract ${catkin_LIBRARIES} ${PCL_LIBRARIES})
 
 add_executable(fastlio_mapping ${LIO_FILES})
-target_link_libraries(fastlio_mapping ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${SUITESPARSE_LIBRARIES})
+target_link_libraries(fastlio_mapping ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${SUITESPARSE_LIBRARIES} dw)

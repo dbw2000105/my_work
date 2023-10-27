@@ -6,7 +6,7 @@ MapServer map_server; //存储特征点的map key是id，value是Feature
 double tracking_rate;
 Feature::OptimizationConfig Feature::optimization_config;
 double Feature::observation_noise = 0.01;
-
+static int frame_count = 0;
 //最大相机个数(滑窗的大小)
 int max_cam_state_size = 20;
 //旋转角度的阈值
@@ -15,6 +15,9 @@ double rotation_threshold = 0.2618;
 double translation_threshold = 0.4;
 //跟踪率的阈值
 double tracking_rate_threshold = 0.5;
+
+Vector3d IMUState::gravity = Vector3d(0, 0, -9.81);
+
 
 Estimator::Estimator(){
     ROS_INFO("init begins");
@@ -158,42 +161,45 @@ void stateAugmentation(const double &time, StateServer &state_server){
  */
 void addFeatureObservations(const sensor_msgs::PointCloudConstPtr &o_msg, StateServer &state_server){
   // 这是个long long int 嗯。。。。直接当作int理解吧
-    // 这个id会在 batchImuProcessing 更新
-    StateIDType state_id = state_server.imu_state.id;
-
-    // 1. 获取当前窗口内特征点数量
-    int curr_feature_num = map_server.size();
-    int tracked_feature_num = 0;
-
-    // Add new observations for existing features or new
-    // features in the map server.
-    // 2. 添加新来的点，做的花里胡哨，其实就是在现有的特征管理里面找，
-    // id已存在说明是跟踪的点，在已有的上面更新
-    // id不存在说明新来的点，那么就新添加一个
-    for ( int i = 0; i < o_msg->points.size(); ++i){
-      int v = o_msg->channels[0].values[i] + 0.5;
-      int feature_id = v / NUM_OF_CAM;
-      int camera_id = v % NUM_OF_CAM;
-      double p_u = o_msg->channels[1].values[i];
-      double p_v = o_msg->channels[2].values[i];
-        if (map_server.find(feature_id) == map_server.end()){
-            // This is a new feature.
-            map_server[feature_id] = Feature(feature_id);
-            map_server[feature_id].observations[state_id] =
-                Vector2d(p_u, p_v);
-        }
-        else{
-            // This is an old feature.
-            map_server[feature_id].observations[state_id] =
-                Vector2d(p_u,p_v);
-            ++tracked_feature_num;
-        }
+  // 这个id会在 batchImuProcessing 更新
+  StateIDType state_id = state_server.imu_state.id;
+  // 1. 获取当前窗口内特征点数量
+  int curr_feature_num = map_server.size();
+  // std::cout << "curr_feature_num: " << curr_feature_num << std::endl;
+  int tracked_feature_num = 0;
+  // std::cout << "map_server.size: " << map_server.size() << std::endl;
+  // Add new observations for existing features or new
+  // features in the map server.
+  // 2. 添加新来的点，做的花里胡哨，其实就是在现有的特征管理里面找，
+  // id已存在说明是跟踪的点，在已有的上面更新
+  // id不存在说明新来的点，那么就新添加一个
+  for ( int i = 0; i < o_msg->points.size(); ++i){
+    int v = o_msg->channels[0].values[i] + 0.5;
+    int feature_id = v / NUM_OF_CAM;
+    int camera_id = v % NUM_OF_CAM;
+    double p_u = o_msg->channels[1].values[i];
+    double p_v = o_msg->channels[2].values[i];
+    // std::cout << "feature_id: " << feature_id << std::endl;
+    if (map_server.find(feature_id) == map_server.end()){
+      // This is a new feature.
+      map_server[feature_id] = Feature(feature_id);
+      map_server[feature_id].observations[state_id] =
+          Vector2d(p_u, p_v);
+      // std::cout << "new feature!" << std::endl;
     }
-    // 这个东西计算了当前进来的跟踪的点中在总数里面的占比（进来的点有可能是新提的）
-    tracking_rate =
-        static_cast<double>(tracked_feature_num) /
-        static_cast<double>(curr_feature_num);
-    // std::cout << "tracking_rate: " << tracking_rate << std::endl;
+    else{
+      // This is an old feature.
+      // std::cout << "this is a old feature" << std::endl;
+      map_server[feature_id].observations[state_id] =
+          Vector2d(p_u,p_v);
+      ++tracked_feature_num;
+    }
+  }
+  // 这个东西计算了当前进来的跟踪的点中在总数里面的占比（进来的点有可能是新提的）
+  tracking_rate =
+      static_cast<double>(tracked_feature_num) /
+      static_cast<double>(curr_feature_num);
+  // std::cout << "tracking_rate: " << tracking_rate << std::endl;
 }
 
 /**
@@ -205,114 +211,102 @@ void removeLostFeatures(StateServer &state_server){
   // BTW, find the size the final Jacobian matrix and residual vector.
   int jacobian_row_size = 0;
   // FeatureIDType 这是个long long int 嗯。。。。直接当作int理解吧
-  vector<FeatureIDType> invalid_feature_ids(0);  // 无效点，最后要删的
-  vector<FeatureIDType> processed_feature_ids(0);  // 待参与更新的点，用完也被无情的删掉
+  vector<FeatureIDType> invalid_feature_ids(0);   // 无效点，最后要删的
+  vector<FeatureIDType> processed_feature_ids(0); // 待参与更新的点，用完也被无情的删掉
       // 遍历所有特征管理里面的点，包括新进来的
-    for (auto iter = map_server.begin();
-            iter != map_server.end(); ++iter)
-    {
-        
-        // Rename the feature to be checked.
-        // 引用，改变feature相当于改变iter->second，类似于指针的效果
-        auto &feature = iter->second;
-        // Pass the features that are still being tracked.
-        // 1. 这个点被当前状态观测到，说明这个点后面还有可能被跟踪
-        // 跳过这些点
-        if (feature.observations.find(state_server.imu_state.id) !=
-            feature.observations.end()) //使用find()，如果找到了，返回指向该元素的迭代器；如果没找到，返回指向map尾部的迭代器
-            continue;
+  for (auto iter = map_server.begin(); iter != map_server.end(); ++iter){
+    // Rename the feature to be checked.
+    // 引用，改变feature相当于改变iter->second，类似于指针的效果
+    auto &feature = iter->second;
+    // Pass the features that are still being tracked.
+    // 1. 这个点被当前状态观测到，说明这个点后面还有可能被跟踪
+    // 跳过这些点
+    // std::cout << "feature observation num :" <<
+    //     feature.observations.size() << std::endl;
+    if (feature.observations.find(state_server.imu_state.id) !=
+      feature.observations.end()) //使用find()，如果找到了，返回指向该元素的迭代器；如果没找到，返回指向map尾部的迭代器
+      continue;
 
-        // 2. 跟踪小于3帧的点，认为是质量不高的点
-        // 也好理解，三角化起码要两个观测，但是只有两个没有其他观测来验证
-        if (feature.observations.size() < 3)
-        {
-            invalid_feature_ids.push_back(feature.id);
-            continue;
-        }
-
-        // Check if the feature can be initialized if it
-        // has not been.
-        // 3. 如果这个特征没有被初始化，尝试去初始化
-        // 初始化就是三角化
-        
-        if (!feature.is_initialized)
-        {
-            // 3.1 看看运动是否足够，没有足够视差或者平移小旋转多这种不符合三角化
-            // 所以就不要这些点了
-            if (!feature.checkMotion(state_server.cam_states))
-            {
-                invalid_feature_ids.push_back(feature.id);
-                continue;
-            }
-            else
-            {
-                // 3.3 尝试三角化，失败也不要了
-                if (!feature.initializePosition(state_server.cam_states))
-                {
-                    invalid_feature_ids.push_back(feature.id);
-                    continue;
-                }
-            }
-        }
-
-        // 4. 到这里表示这个点能用于更新，所以准备下一步计算
-        // 一个观测代表一帧，一帧有左右两个观测
-        // 也就是算重投影误差时维度将会是4 * feature.observations.size()
-        // 这里为什么减3下面会提到
-        jacobian_row_size += 4 * feature.observations.size() - 3;
-        // 接下来要参与优化的点加入到这个变量中
-        processed_feature_ids.push_back(feature.id);
+    // 2. 跟踪小于3帧的点，认为是质量不高的点
+    // 也好理解，三角化起码要两个观测，但是只有两个没有其他观测来验证
+    if (feature.observations.size() < 3){
+      invalid_feature_ids.push_back(feature.id);
+      continue;
     }
+
+    // Check if the feature can be initialized if it
+    // has not been.
+    // 3. 如果这个特征没有被初始化，尝试去初始化
+    // 初始化就是三角化
+    if (!feature.is_initialized){
+      // 3.1 看看运动是否足够，没有足够视差或者平移小旋转多这种不符合三角化
+      // 所以就不要这些点了
+      if (!feature.checkMotion(state_server.cam_states)){
+          invalid_feature_ids.push_back(feature.id);
+          // std::cout << "out narrow move " << std::endl;
+          continue;
+      }
+      else{
+        // 3.3 尝试三角化，失败也不要了
+        if (!feature.initializePosition(state_server.cam_states)){
+          invalid_feature_ids.push_back(feature.id);
+          // std::cout << "out fail " << std::endl;
+          continue;
+        }
+      }
+    }
+
+    // 4. 到这里表示这个点能用于更新，所以准备下一步计算
+    // 一个观测代表一帧，一帧有左右两个观测
+    // 也就是算重投影误差时维度将会是4 * feature.observations.size()
+    // 这里为什么减3下面会提到
+    jacobian_row_size += 2 * feature.observations.size() - 3;
+    // 接下来要参与优化的点加入到这个变量中
+    processed_feature_ids.push_back(feature.id);
+    }
+
     // Remove the features that do not have enough measurements.
     // 5. 删掉非法点
     for (const auto &feature_id : invalid_feature_ids)
-        map_server.erase(feature_id);
+      map_server.erase(feature_id);
+        
 
     // Return if there is no lost feature to be processed.
-    if (processed_feature_ids.size() == 0)
-        return;
+    if (processed_feature_ids.empty())
+      return;
 
     // 准备好误差相对于状态量的雅可比
-    MatrixXd H_x = MatrixXd::Zero(jacobian_row_size,
-                                    21 + 6 * state_server.cam_states.size());
+    MatrixXd H_x = MatrixXd::Zero(jacobian_row_size, 21 + 6 * state_server.cam_states.size());
     VectorXd r = VectorXd::Zero(jacobian_row_size);
     int stack_cntr = 0;
 
     // Process the features which lose track.
     // 6. 处理特征点
-    for (const auto &feature_id : processed_feature_ids)
-    {
-        auto &feature = map_server[feature_id];
+    for (const auto &feature_id : processed_feature_ids){
+      auto &feature = map_server[feature_id];
+      vector<StateIDType> cam_state_ids(0);
+      for (const auto &measurement : feature.observations)
+          cam_state_ids.push_back(measurement.first);
 
-        vector<StateIDType> cam_state_ids(0);
-        for (const auto &measurement : feature.observations)
-            cam_state_ids.push_back(measurement.first);
-
-        MatrixXd H_xj;
-        VectorXd r_j;
-        // 6.1 计算雅可比，计算重投影误差
-        featureJacobian(feature.id, cam_state_ids, H_xj, r_j, state_server);
-
-        // 6.2 卡方检验，剔除错误点，并不是所有点都用
-        if (gatingTest(H_xj, r_j, cam_state_ids.size() - 1, state_server))
-        {
-            H_x.block(stack_cntr, 0, H_xj.rows(), H_xj.cols()) = H_xj;
-            r.segment(stack_cntr, r_j.rows()) = r_j;
-            stack_cntr += H_xj.rows();
-        }
-        {
-            H_x.block(stack_cntr, 0, H_xj.rows(), H_xj.cols()) = H_xj;
-            r.segment(stack_cntr, r_j.rows()) = r_j;
-            stack_cntr += H_xj.rows();
-        }
-
-        // Put an upper bound on the row size of measurement Jacobian,
-        // which helps guarantee the executation time.
-        // 限制最大更新量
-        if (stack_cntr > 1500)
-            break;
+      MatrixXd H_xj;
+      VectorXd r_j;
+      // 6.1 计算雅可比，计算重投影误差
+      featureJacobian(feature.id, cam_state_ids, H_xj, r_j, state_server);
+      // std::cout << "H_xj.size: " << H_xj.size() << std::endl;
+      // std::cout << "r_j.size: " << r_j.size() << std::endl;
+      // std::cout << "cam_state_ids.size(): " << cam_state_ids.size() << std::endl;
+      // 6.2 卡方检验，剔除错误点，并不是所有点都用
+      if (gatingTest(H_xj, r_j, cam_state_ids.size() - 1, state_server)){
+          H_x.block(stack_cntr, 0, H_xj.rows(), H_xj.cols()) = H_xj;
+          r.segment(stack_cntr, r_j.rows()) = r_j;
+          stack_cntr += H_xj.rows();
+      }
+      // Put an upper bound on the row size of measurement Jacobian,
+      // which helps guarantee the executation time.
+      // 限制最大更新量
+      if (stack_cntr > 1500)
+          break;
     }
-
     // resize成实际大小
     H_x.conservativeResize(stack_cntr, H_x.cols());
     r.conservativeResize(stack_cntr);
@@ -347,7 +341,7 @@ void featureJacobian(const FeatureIDType &feature_id, const std::vector<StateIDT
     int jacobian_row_size = 0;
     // 行数等于4*观测数量，一个观测在双目上都有，所以是2*2
     // 此时还没有0空间投影
-    jacobian_row_size = 4 * valid_cam_state_ids.size();
+    jacobian_row_size = 2 * valid_cam_state_ids.size();
 
     // 误差相对于状态量的雅可比，没有约束列数，因为列数一直是最新的
     MatrixXd H_xj = MatrixXd::Zero(jacobian_row_size,
@@ -362,9 +356,9 @@ void featureJacobian(const FeatureIDType &feature_id, const std::vector<StateIDT
     for (const auto &cam_id : valid_cam_state_ids)
     {
 
-        Matrix<double, 4, 6> H_xi = Matrix<double, 4, 6>::Zero();
-        Matrix<double, 4, 3> H_fi = Matrix<double, 4, 3>::Zero();
-        Vector4d r_i = Vector4d::Zero();
+        Matrix<double, 2, 6> H_xi = Matrix<double, 2, 6>::Zero();
+        Matrix<double, 2, 3> H_fi = Matrix<double, 2, 3>::Zero();
+        Vector2d r_i = Vector2d::Zero();
         // 2.1 计算一个左右目观测的雅可比
         measurementJacobian(cam_id, feature.id, H_xi, H_fi, r_i, state_server);
 
@@ -374,10 +368,10 @@ void featureJacobian(const FeatureIDType &feature_id, const std::vector<StateIDT
             state_server.cam_states.begin(), cam_state_iter);
 
         // Stack the Jacobians.
-        H_xj.block<4, 6>(stack_cntr, 21 + 6 * cam_state_cntr) = H_xi;
-        H_fj.block<4, 3>(stack_cntr, 0) = H_fi;
-        r_j.segment<4>(stack_cntr) = r_i;
-        stack_cntr += 4;
+        H_xj.block<2, 6>(stack_cntr, 21 + 6 * cam_state_cntr) = H_xi;
+        H_fj.block<2, 3>(stack_cntr, 0) = H_fi;
+        r_j.segment<2>(stack_cntr) = r_i;
+        stack_cntr += 2;
     }
 
     // Project the residual and Jacobians onto the nullspace
@@ -409,94 +403,97 @@ void featureJacobian(const FeatureIDType &feature_id, const std::vector<StateIDT
 void measurementJacobian(
     const StateIDType &cam_state_id,
     const FeatureIDType &feature_id,
-    Matrix<double, 4, 6> &H_x, Matrix<double, 4, 3> &H_f, Vector4d &r, StateServer &state_server)
+    Matrix<double, 2, 6> &H_x, Matrix<double, 2, 3> &H_f, Vector2d &r, StateServer &state_server)
 {
 
-    // // Prepare all the required data.
-    // // 1. 取出相机状态与特征
-    // const CAMState &cam_state = state_server.cam_states[cam_state_id];
-    // const Feature &feature = map_server[feature_id];
+    // Prepare all the required data.
+    // 1. 取出相机状态与特征
+    const CAMState &cam_state = state_server.cam_states[cam_state_id];
+    const Feature &feature = map_server[feature_id];
 
-    // // 2. 取出左目位姿，根据外参计算右目位姿
-    // // Cam0 pose.
-    // Matrix3d R_w_c0 = quaternionToRotation(cam_state.orientation);
-    // const Vector3d &t_c0_w = cam_state.position;
+    // 2. 取出左目位姿，根据外参计算右目位姿
+    // Cam0 pose.
+    Matrix3d R_w_c0 = cam_state.orientation;
+    const Vector3d &t_c0_w = cam_state.position;
 
     // // Cam1 pose.
     // Matrix3d R_c0_c1 = CAMState::T_cam0_cam1.linear();
     // Matrix3d R_w_c1 = CAMState::T_cam0_cam1.linear() * R_w_c0;
     // Vector3d t_c1_w = t_c0_w - R_w_c1.transpose() * CAMState::T_cam0_cam1.translation();
 
-    // // 3. 取出三维点坐标与归一化的坐标点，因为前端发来的是归一化坐标的
-    // // 3d feature position in the world frame.
-    // // And its observation with the stereo cameras.
-    // const Vector3d &p_w = feature.position;
-    // const Vector4d &z = feature.observations.find(cam_state_id)->second;
+    // 3. 取出三维点坐标与归一化的坐标点，因为前端发来的是归一化坐标的
+    // 3d feature position in the world frame.
+    // And its observation with the stereo cameras.
+    const Vector3d &p_w = feature.position;
+    const Vector2d &z = feature.observations.find(cam_state_id)->second;
 
-    // // 4. 转到左右目相机坐标系下
-    // // Convert the feature position from the world frame to
-    // // the cam0 and cam1 frame.
-    // Vector3d p_c0 = R_w_c0 * (p_w - t_c0_w);
+    // 4. 转到左右目相机坐标系下
+    // Convert the feature position from the world frame to
+    // the cam0 and cam1 frame.
+    Vector3d p_c0 = R_w_c0 * (p_w - t_c0_w);
     // Vector3d p_c1 = R_w_c1 * (p_w - t_c1_w);
-    // // p_c1 = R_c0_c1 * R_w_c0 * (p_w - t_c0_w + R_w_c1.transpose() * t_cam0_cam1)
-    // //      = R_c0_c1 * (p_c0 + R_w_c0 * R_w_c1.transpose() * t_cam0_cam1)
-    // //      = R_c0_c1 * (p_c0 + R_c0_c1 * t_cam0_cam1)
+    // p_c1 = R_c0_c1 * R_w_c0 * (p_w - t_c0_w + R_w_c1.transpose() * t_cam0_cam1)
+    //      = R_c0_c1 * (p_c0 + R_w_c0 * R_w_c1.transpose() * t_cam0_cam1)
+    //      = R_c0_c1 * (p_c0 + R_c0_c1 * t_cam0_cam1)
 
-    // // Compute the Jacobians.
-    // // 5. 计算雅可比
-    // // 左相机归一化坐标点相对于左相机坐标系下的点的雅可比
-    // // (x, y) = (X / Z, Y / Z)
-    // //下面两行即误差对投影点的导数，原始误差对投影的雅可比矩阵是2*3的，这里是4*3的，是因为左右目都有
-    // Matrix<double, 4, 3> dz_dpc0 = Matrix<double, 4, 3>::Zero();
-    // dz_dpc0(0, 0) = 1 / p_c0(2);
-    // dz_dpc0(1, 1) = 1 / p_c0(2);
-    // dz_dpc0(0, 2) = -p_c0(0) / (p_c0(2) * p_c0(2));
-    // dz_dpc0(1, 2) = -p_c0(1) / (p_c0(2) * p_c0(2));
+    // Compute the Jacobians.
+    // 5. 计算雅可比
+    // 左相机归一化坐标点相对于左相机坐标系下的点的雅可比
+    // (x, y) = (X / Z, Y / Z)
+    //下面两行即误差对投影点的导数，原始误差对投影的雅可比矩阵是2*3的，这里是4*3的，是因为左右目都有
+    Matrix<double, 2, 3> dz_dpc0 = Matrix<double, 2, 3>::Zero();
+    dz_dpc0(0, 0) = 1 / p_c0(2);
+    dz_dpc0(1, 1) = 1 / p_c0(2);
+    dz_dpc0(0, 2) = -p_c0(0) / (p_c0(2) * p_c0(2));
+    dz_dpc0(1, 2) = -p_c0(1) / (p_c0(2) * p_c0(2));
 
-    // // 与上同理
+    // 与上同理
     // Matrix<double, 4, 3> dz_dpc1 = Matrix<double, 4, 3>::Zero();
     // dz_dpc1(2, 0) = 1 / p_c1(2);
     // dz_dpc1(3, 1) = 1 / p_c1(2);
     // dz_dpc1(2, 2) = -p_c1(0) / (p_c1(2) * p_c1(2));
     // dz_dpc1(3, 2) = -p_c1(1) / (p_c1(2) * p_c1(2));
 
-    // // 左相机坐标系下的三维点相对于左相机位姿的雅可比 先r后t
-    // Matrix<double, 3, 6> dpc0_dxc = Matrix<double, 3, 6>::Zero();
-    // dpc0_dxc.leftCols(3) = skewSymmetric(p_c0);
-    // dpc0_dxc.rightCols(3) = -R_w_c0;
+    // 左相机坐标系下的三维点相对于左相机位姿的雅可比 先r后t
+    Matrix<double, 3, 6> dpc0_dxc = Matrix<double, 3, 6>::Zero();
+    dpc0_dxc.leftCols(3) = skewSymmetric(p_c0);
+    dpc0_dxc.rightCols(3) = -R_w_c0;
 
-    // // 右相机坐标系下的三维点相对于左相机位姿的雅可比 先r后t
+    // 右相机坐标系下的三维点相对于左相机位姿的雅可比 先r后t
     // Matrix<double, 3, 6> dpc1_dxc = Matrix<double, 3, 6>::Zero();
     // dpc1_dxc.leftCols(3) = R_c0_c1 * skewSymmetric(p_c0);
     // dpc1_dxc.rightCols(3) = -R_w_c1;
 
-    // // Vector3d p_c0 = R_w_c0 * (p_w - t_c0_w);
-    // // Vector3d p_c1 = R_w_c1 * (p_w - t_c1_w);
-    // // p_c0 对 p_w
-    // Matrix3d dpc0_dpg = R_w_c0;
-    // // p_c1 对 p_w
+    // Vector3d p_c0 = R_w_c0 * (p_w - t_c0_w);
+    // Vector3d p_c1 = R_w_c1 * (p_w - t_c1_w);
+    // p_c0 对 p_w
+    Matrix3d dpc0_dpg = R_w_c0;
+    // p_c1 对 p_w
     // Matrix3d dpc1_dpg = R_w_c1;
 
-    // // 两个雅可比
+    // 两个雅可比
     // H_x = dz_dpc0 * dpc0_dxc + dz_dpc1 * dpc1_dxc;
     // H_f = dz_dpc0 * dpc0_dpg + dz_dpc1 * dpc1_dpg;
+    H_x = dz_dpc0 * dpc0_dxc ;
+    H_f = dz_dpc0 * dpc0_dpg ;
 
-    // // Modifty the measurement Jacobian to ensure
-    // // observability constrain.
-    // // 6. OC
-    // Matrix<double, 4, 6> A = H_x;
-    // Matrix<double, 6, 1> u = Matrix<double, 6, 1>::Zero();
-    // u.block<3, 1>(0, 0) = 
-    //     quaternionToRotation(cam_state.orientation_null) * IMUState::gravity;
-    // u.block<3, 1>(3, 0) =
-    //     skewSymmetric(p_w - cam_state.position_null) * IMUState::gravity;
-    // H_x = A - A * u * (u.transpose() * u).inverse() * u.transpose();
-    // H_f = -H_x.block<4, 3>(0, 3);
+    // Modifty the measurement Jacobian to ensure
+    // observability constrain.
+    // 6. OC
+    Matrix<double, 2, 6> A = H_x;
+    Matrix<double, 6, 1> u = Matrix<double, 6, 1>::Zero();
+    u.block<3, 1>(0, 0) = 
+        cam_state.orientation_null * IMUState::gravity;
+    u.block<3, 1>(3, 0) =
+        skewSymmetric(p_w - cam_state.position_null) * IMUState::gravity;
+    H_x = A - A * u * (u.transpose() * u).inverse() * u.transpose();
+    H_f = -H_x.block<2, 3>(0, 3);
 
-    // // Compute the residual.
-    // // 7. 计算归一化平面坐标误差
+    // Compute the residual.
+    // 7. 计算归一化平面坐标误差
     // r = z - Vector4d(p_c0(0) / p_c0(2), p_c0(1) / p_c0(2),
     //                     p_c1(0) / p_c1(2), p_c1(1) / p_c1(2));
+  r = z - Vector2d(p_c0(0) / p_c0(2), p_c0(1) / p_c0(2));
 }
 void measurementUpdate(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, StateServer &state_server){
   if (H.rows() == 0 || r.rows() == 0)
@@ -630,7 +627,7 @@ bool gatingTest(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, const int &d
 
 void pruneCamStateBuffer(StateServer &state_server){
   // 数量还不到该删的程度，配置文件里面是20个
-  std::cout << "state_server.cam_states.size: " << state_server.cam_states.size() << std::endl;
+  // std::cout << "state_server.cam_states.size: " << state_server.cam_states.size() << std::endl;
     if (state_server.cam_states.size() < max_cam_state_size)
         return;
 
@@ -652,7 +649,7 @@ void pruneCamStateBuffer(StateServer &state_server){
                 feature.observations.end()) //找到了对应的ID
                 involved_cam_state_ids.push_back(cam_id);
         }
-        if (involved_cam_state_ids.size() == 0)
+        if (involved_cam_state_ids.empty())
             continue;
         // 2.2 这个点只在一个里面有观测那就直接删
         // 只用一个观测更新不了状态
@@ -691,7 +688,7 @@ void pruneCamStateBuffer(StateServer &state_server){
         // 意味着有involved_cam_state_ids.size() 数量的观测要被删去
         // 但是因为待删去的帧间有共同观测的关系，直接删会损失这部分信息
         // 所以临删前做最后一次更新
-        jacobian_row_size += 4 * involved_cam_state_ids.size() - 3;
+        jacobian_row_size += 2 * involved_cam_state_ids.size() - 3;
     }
     // Compute the Jacobian and residual.
     // 3. 计算待删掉的这部分观测的雅可比与误差

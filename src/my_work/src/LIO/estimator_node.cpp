@@ -11,12 +11,17 @@
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
 
-#include "CameraMeasurement.h"
 #include "common_lib.h"
 #include "estimator.h"
 #include "parameters.h"
 #include "utility/visualization.h"
 #define CAM_MEASUREMENT_COV 1e-3
+
+#define BACKWARD_HAS_DW 1
+#include "backward.hpp"
+namespace backward{
+    backward::SignalHandling sh;
+}
 
 //; 全局变量，Camera_Lidar_queue是一个结构体，存储camera_lidar数据
 Camera_Lidar_queue g_camera_lidar_queue;
@@ -30,8 +35,6 @@ double current_time = -1;
 queue<sensor_msgs::ImuConstPtr> imu_buf;
 queue<sensor_msgs::PointCloudConstPtr> feature_buf;
 queue<sensor_msgs::PointCloudConstPtr> relo_buf;
-// queue<CameraMeasurementPtr> msckf_feature_buf;
-// CameraMeasurementPtr msckf_feature_msg;
 
 int sum_of_wait = 0;
 
@@ -58,6 +61,7 @@ vec_3 diff_vins_lio_t = vec_3::Zero();
 bool init_feature = 0;
 bool init_imu = 1;
 double last_imu_t = -1;
+
 
 // imu回调函数，将imu_msg保存到imu_buf，IMU状态递推并发布[P,Q,V,header]
 void imu_callback(const sensor_msgs::ImuConstPtr &_imu_msg){
@@ -311,12 +315,12 @@ void process(){
       system_state_transform(state_aft_integration);
       //3. 相机状态扩增  
       stateAugmentation(measurements.back().second->header.stamp.toSec(), state_server);
-      //4. 添加新的观测
+      // 4. 添加新的观测
       addFeatureObservations(measurements.back().second, state_server);
-      //5. 使用不再跟踪上的点来更新
+      // 5. 使用不再跟踪上的点来更新
       removeLostFeatures(state_server);
-      //6. 当cam状态数达到最大值时，挑出若干cam状态待删除
-      //并基于能被2帧以上这些cam观测到的feature进行MSCKF测量更新
+      // 6. 当cam状态数达到最大值时，挑出若干cam状态待删除
+      // 并基于能被2帧以上这些cam观测到的feature进行MSCKF测量更新
       pruneCamStateBuffer(state_server);
       unlock_lio(estimator);
     }

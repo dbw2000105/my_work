@@ -161,8 +161,8 @@ void measurementUpdate(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, State
 bool gatingTest(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, const int &dof,StateServer &state_server);
 void measurementJacobian(const StateIDType &cam_state_id,
     const FeatureIDType &feature_id,
-    Eigen::Matrix<double, 4, 6> &H_x,
-    Eigen::Matrix<double, 4, 3> &H_f,
-    Eigen::Vector4d &r, StateServer &state_server);
+    Eigen::Matrix<double, 2, 6> &H_x,
+    Eigen::Matrix<double, 2, 3> &H_f,
+    Eigen::Vector2d &r, StateServer &state_server);
 
 void findRedundantCamStates(vector<StateIDType> &rm_cam_state_ids, StateServer &state_server);
