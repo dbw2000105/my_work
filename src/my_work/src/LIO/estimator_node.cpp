@@ -28,13 +28,14 @@ Camera_Lidar_queue g_camera_lidar_queue;
 MeasureGroup Measures;    //; 一帧lidar和IMU 数据，这个是不是不应该定义？
 StatesGroup g_lio_state;  //; lio的状态，里面包括 Q P V bg ba G  一共3*6=18维
 Estimator estimator;
-StateServer state_server; //存储IMU和cam的数据
 
 std::condition_variable con; // 条件变量
 double current_time = -1;
 queue<sensor_msgs::ImuConstPtr> imu_buf;
 queue<sensor_msgs::PointCloudConstPtr> feature_buf;
-queue<sensor_msgs::PointCloudConstPtr> relo_buf;
+
+eigen_q diff_vins_lio_q = eigen_q::Identity(); //激光雷达和相机的姿态差值
+vec_3 diff_vins_lio_t = vec_3::Zero(); //激光雷达和相机的平移差值
 
 int sum_of_wait = 0;
 
@@ -54,9 +55,6 @@ Eigen::Vector3d tmp_Ba;
 Eigen::Vector3d tmp_Bg;
 Eigen::Vector3d acc_0;
 Eigen::Vector3d gyr_0;
-
-eigen_q diff_vins_lio_q = eigen_q::Identity();
-vec_3 diff_vins_lio_t = vec_3::Zero();
 
 bool init_feature = 0;
 bool init_imu = 1;
@@ -204,22 +202,22 @@ std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointC
             ROS_WARN("no imu between two image");
 
         measurements.emplace_back(IMUs, img_msg);
-        state_server.imu_state.id++;
+        estimator.imu_state.id++;
     }
 
     return measurements;
 }
 //将全局状态赋值给msckf状态，不改变原先id的值
 inline void system_state_transform(StatesGroup &global_state){
-  state_server.imu_state.rot_end = global_state.rot_end;
-  state_server.imu_state.pos_end = global_state.pos_end;
-  state_server.imu_state.vel_end = global_state.vel_end;
-  state_server.imu_state.bias_a = global_state.bias_a;
-  state_server.imu_state.bias_g = global_state.bias_g;
-  // state_server.imu_state.cov = global_state.cov;
-  state_server.state_cov.block<18, 18>(0, 0) = global_state.cov;
-  state_server.imu_state.last_update_time = global_state.last_update_time;
-  state_server.imu_state.gravity = global_state.gravity;
+  estimator.imu_state.rot_end = global_state.rot_end;
+  estimator.imu_state.pos_end = global_state.pos_end;
+  estimator.imu_state.vel_end = global_state.vel_end;
+  estimator.imu_state.bias_a = global_state.bias_a;
+  estimator.imu_state.bias_g = global_state.bias_g;
+  // estimator.imu_state.cov = global_state.cov;
+  estimator.state_cov.block<18, 18>(0, 0) = global_state.cov;
+  estimator.imu_state.last_update_time = global_state.last_update_time;
+  estimator.imu_state.gravity = global_state.gravity;
 }
 
 void process(){
@@ -230,8 +228,8 @@ void process(){
   std::shared_ptr<ImuProcess> p_imu(new ImuProcess()); //存储IMU的数据
   //sensor_msgs::PointCloudConstPtr 到 CameraMeasurementConstPtr 数据格式的转换
 
-  state_server.state_cov = Eigen::MatrixXd::Zero(21, 21);
-  // StateServer state_server; //存储IMU和cam的数据
+  estimator.state_cov = Eigen::MatrixXd::Zero(21, 21);
+  // StateServer estimator; //存储IMU和cam的数据
   g_camera_lidar_queue.m_if_lidar_can_start =
       g_camera_lidar_queue.m_if_lidar_start_first; //雷达首先启动
 
@@ -289,7 +287,9 @@ void process(){
         }
       }
       StatesGroup state_aft_integration = g_lio_state;  //; 把状态赋值给局部变量：积分后的状态变量
-      int esikf_update_valid = false;
+      std::cout << "lio1: p " << g_lio_state.pos_end.transpose() << std::endl;
+
+      int msckf_update_valid = false;
       if (!imu_queue.empty()){
         //; 正常情况下这个条件不会满足
         if (g_lio_state.last_update_time == 0){
@@ -299,7 +299,7 @@ void process(){
         //; start_dt < 0, end_dt < 0
         double start_dt = g_lio_state.last_update_time - imu_queue.front()->header.stamp.toSec();
         double end_dt = cam_update_tim - imu_queue.back()->header.stamp.toSec();  //; 图像时间应该是<最后一个IMU时间的，所以这里也是负数
-        esikf_update_valid = true;
+        msckf_update_valid = true;
 
         //; 注意：只要历史上收到过一帧lidar数据，m_if_have_lidar_data就会被置位为1。
         if (g_camera_lidar_queue.m_if_have_lidar_data && (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)){
@@ -309,20 +309,45 @@ void process(){
           //!     恰好错位了一个IMU的位置
           //; 注意这里，得到的state_aft_intergration是最新的预测位姿，它的last_update_time也更新了，
           //;  但是传入的g_lio_state是常量！不会改变！
+          std::cout <<std::setprecision(12) << "cam_update_time: " << cam_update_tim << std::endl;
           state_aft_integration = p_imu->imu_integration(g_lio_state, imu_queue, 0, cam_update_tim - imu_queue.back()->header.stamp.toSec());
+          std::cout << "state_aft_integration.p: " << state_aft_integration.pos_end.transpose() << std::endl;
         }
       }
       system_state_transform(state_aft_integration);
       //3. 相机状态扩增  
-      stateAugmentation(measurements.back().second->header.stamp.toSec(), state_server);
+      estimator.stateAugmentation(measurements.back().second->header.stamp.toSec());
       // 4. 添加新的观测
-      addFeatureObservations(measurements.back().second, state_server);
+      estimator.addFeatureObservations(measurements.back().second);
       // 5. 使用不再跟踪上的点来更新
-      removeLostFeatures(state_server);
+      estimator.removeLostFeatures();
       // 6. 当cam状态数达到最大值时，挑出若干cam状态待删除
       // 并基于能被2帧以上这些cam观测到的feature进行MSCKF测量更新
-      pruneCamStateBuffer(state_server);
+      estimator.pruneCamStateBuffer();
+
+      // std::cout << "lio: p " << g_lio_state.pos_end.transpose() << std::endl;
+      // std::cout << "vio: p " << estimator.imu_state.pos_end.transpose() << std::endl;
+
+      //计算vio和lio的差值
+      diff_vins_lio_q = eigen_q(estimator.imu_state.rot_end.transpose() * state_aft_integration.rot_end);
+      diff_vins_lio_t = state_aft_integration.pos_end - estimator.imu_state.pos_end;
+      std::cout << "diff_vins_lio_t: " << diff_vins_lio_t << std::endl;
       unlock_lio(estimator);
+      //如果收到过Lidar的数据，那么这个条件一定满足
+      if (g_camera_lidar_queue.m_if_have_lidar_data && (g_lio_state.last_update_time - g_camera_lidar_queue.m_visual_init_time > g_camera_lidar_queue.m_lidar_drag_cam_tim)){
+        //; 上次状态更新的时间 - VIO初始化的时间 > 10秒
+        StatesGroup state_before_update = g_lio_state;
+
+        //; 判断是否赋值ba
+        if (estimator.imu_state.bias_a.norm() < 0.5){
+          g_lio_state.bias_a = estimator.imu_state.bias_a;
+        }
+        //; bg是相信的，直接赋值
+        g_lio_state.bias_g = estimator.imu_state.bias_g;
+        //; 还是相信LIO的旋转，这里把估计的速度乘以旋转差值
+        g_lio_state.vel_end = diff_vins_lio_q.toRotationMatrix() * estimator.imu_state.vel_end;
+        g_lio_state.cov = estimator.state_cov; 
+      }
     }
     m_estimator.unlock();
   }

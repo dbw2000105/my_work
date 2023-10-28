@@ -2,94 +2,59 @@
 #include "Eigen/src/Core/Matrix.h"
 #include <Eigen/SPQRSupport>
 #include "common_lib.h"
-MapServer map_server; //存储特征点的map key是id，value是Feature
-double tracking_rate;
-Feature::OptimizationConfig Feature::optimization_config;
-double Feature::observation_noise = 0.01;
-static int frame_count = 0;
-//最大相机个数(滑窗的大小)
-int max_cam_state_size = 20;
-//旋转角度的阈值
-double rotation_threshold = 0.2618;
-//平移距离的阈值
-double translation_threshold = 0.4;
-//跟踪率的阈值
-double tracking_rate_threshold = 0.5;
 
 Vector3d IMUState::gravity = Vector3d(0, 0, -9.81);
-
+Feature::OptimizationConfig Feature::optimization_config;
+double Feature::observation_noise = 0.01;
 
 Estimator::Estimator(){
-    ROS_INFO("init begins");
-    clearState();
+  ROS_INFO("init begins");
+  clearState();
+  setParameter();
 }
 void Estimator::clearState(){
-    for (int i = 0; i < WINDOW_SIZE + 1; i++){
-        Rs[i].setIdentity();
-        Ps[i].setZero();
-        Vs[i].setZero();
-        Bas[i].setZero();
-        Bgs[i].setZero();
-        dt_buf[i].clear();
-        linear_acceleration_buf[i].clear();
-        angular_velocity_buf[i].clear();
-
-        if (pre_integrations[i] != nullptr)
-            delete pre_integrations[i];
-        pre_integrations[i] = nullptr;
-    }
-
-    for (int i = 0; i < NUM_OF_CAM; i++){
-        tic[i] = Vector3d::Zero();
-        ric[i] = Matrix3d::Identity();
-    }
-
-    for (auto &it : m_all_image_frame){
-        if (it.second.pre_integration != nullptr){
-            delete it.second.pre_integration;
-            it.second.pre_integration = nullptr;
-        }
-    }
-
-    solver_flag = INITIAL;
-    first_imu = false,
-    sum_of_back = 0;
-    sum_of_front = 0;
-    frame_count = 0;
-    solver_flag = INITIAL;
-    initial_timestamp = 0;
-    m_all_image_frame.clear();
-    td = TD;
-
-
-    if (tmp_pre_integration != nullptr)
-        delete tmp_pre_integration;
-
-    tmp_pre_integration = nullptr;
+  
+  solver_flag = NON_LINEAR;
+  td = TD;
+  map_server.clear(); //清除Map_server中的特征点
+  cam_states.clear(); //清除所有相机状态
+  imu_state.rot_end = Eigen::Matrix3d::Identity();
+  imu_state.vel_end = Eigen::Vector3d::Zero();
+  imu_state.pos_end = Eigen::Vector3d::Zero();
+  imu_state.last_update_time = 0;
+  imu_state.cov = Eigen::Matrix<double, 18, 18>::Identity();
 }
 
 void Estimator::setParameter(){
   // 用于判断状态是否发散
-    // nh.param<double>("position_std_threshold", position_std_threshold, 8.0);
+   max_cam_state_size = 20;
+  //旋转角度的阈值
+   rotation_threshold = 0.2618;
+  //平移距离的阈值
+   translation_threshold = 0.4;
+  //跟踪率的阈值
+   tracking_rate_threshold = 0.5;
+  //跟踪率
+   tracking_rate = 0;
 }
 
-void stateAugmentation(const double &time, StateServer &state_server){
+void Estimator::stateAugmentation(const double &time){
   // 1. 取出当前更新好的imu状态量
   // 1.1 取出imu与camera的外参 R_w_i 表示从w系到I系
   const Matrix3d &R_i_c = READ_RIC[0].transpose(); //IMU到相机的旋转矩阵 //!注意：READ_RIC[0]中存储的是从相机到IMU的旋转矩阵，因此需要转置
   const Vector3d &t_c_i = READ_TIC[0]; //IMU到相机的平移向量 //!同理
 
   // 1.2 取出imu旋转平移，按照外参，将这个时刻cam0的位姿算出来
-  Matrix3d R_w_i = state_server.imu_state.rot_end; //w_i表示IMU到世界系的旋转矩阵
+  Matrix3d R_w_i = imu_state.rot_end; //w_i表示IMU到世界系的旋转矩阵
   Matrix3d R_w_c = R_i_c * R_w_i;
-  Vector3d t_c_w = state_server.imu_state.pos_end +
+  Vector3d t_c_w = imu_state.pos_end +
                       R_w_i.transpose() * t_c_i; //TODO 这里state_server.imu_state.pos_end是哪个坐标系之间的转换
 
   // 2. 注册新的相机状态到状态库中
   // 嗯。。。说人话就是找个记录的，不然咋更新
-  state_server.cam_states[state_server.imu_state.id] =
-      CAMState(state_server.imu_state.id);
-  CAMState &cam_state = state_server.cam_states[state_server.imu_state.id];
+  cam_states[imu_state.id] =
+      CAMState(imu_state.id);
+  CAMState &cam_state = cam_states[imu_state.id];
 
 
   // 严格上讲这个时间不对，但是几乎没影响
@@ -119,39 +84,39 @@ void stateAugmentation(const double &time, StateServer &state_server){
   // 4. 增广协方差矩阵
   // 4.1 扩展矩阵大小 conservativeResize函数不改变原矩阵对应位置的数值
 
-  size_t old_rows = state_server.state_cov.rows();
-  size_t old_cols = state_server.state_cov.cols();
-  state_server.state_cov.conservativeResize(old_rows + 6, old_cols + 6);
+  size_t old_rows = state_cov.rows();
+  size_t old_cols = state_cov.cols();
+  state_cov.conservativeResize(old_rows + 6, old_cols + 6);
   // Rename some matrix blocks for convenience.
   // imu的协方差矩阵 21×21
   const Matrix<double, 21, 21> &P11 =
-      state_server.state_cov.block<21, 21>(0, 0);
+      state_cov.block<21, 21>(0, 0);
 
   // imu相对于各个相机状态量的协方差矩阵（不包括最新的）
   const MatrixXd &P12 =
-      state_server.state_cov.block(0, 21, 21,  old_cols - 21);
+      state_cov.block(0, 21, 21,  old_cols - 21);
 
   // Fill in the augmented state covariance.
   // 4.2 计算协方差矩阵
   // 左下角
-  state_server.state_cov.block(old_rows, 0, 6, old_cols) << J * P11, J * P12;
+  state_cov.block(old_rows, 0, 6, old_cols) << J * P11, J * P12;
 
   // 右上角
-  state_server.state_cov.block(0, old_cols, old_rows, 6) =
-      state_server.state_cov.block(old_rows, 0, 6, old_cols).transpose();
+  state_cov.block(0, old_cols, old_rows, 6) =
+      state_cov.block(old_rows, 0, 6, old_cols).transpose();
 
   // 右下角，关于相机部分的J都是0所以省略了
-  state_server.state_cov.block<6, 6>(old_rows, old_cols) =
+  state_cov.block<6, 6>(old_rows, old_cols) =
       J * P11 * J.transpose();
 
   // Fix the covariance to be symmetric
   // 强制对称
-  MatrixXd state_cov_fixed = (state_server.state_cov +
-                              state_server.state_cov.transpose()) /
+  MatrixXd state_cov_fixed = (state_cov +
+                              state_cov.transpose()) /
                               2.0;
-  state_server.state_cov = state_cov_fixed;
-  // std::cout << "state_server: " << state_server.state_cov.size() << std::endl;
-  // std::cout << "IMU state id: " << state_server.imu_state.id << std::endl;
+  state_cov = state_cov_fixed;
+  // std::cout << " " << state_cov.size() << std::endl;
+  // std::cout << "IMU state id: " << imu_state.id << std::endl;
 
 }
 
@@ -159,10 +124,10 @@ void stateAugmentation(const double &time, StateServer &state_server){
  * @brief 添加特征点观测
  * @param  msg 前端发来的特征点信息，里面包含了时间，左右目上的角点及其id（严格意义上不能说是特征点）
  */
-void addFeatureObservations(const sensor_msgs::PointCloudConstPtr &o_msg, StateServer &state_server){
+void Estimator::addFeatureObservations(const sensor_msgs::PointCloudConstPtr &o_msg){
   // 这是个long long int 嗯。。。。直接当作int理解吧
   // 这个id会在 batchImuProcessing 更新
-  StateIDType state_id = state_server.imu_state.id;
+  StateIDType state_id = imu_state.id;
   // 1. 获取当前窗口内特征点数量
   int curr_feature_num = map_server.size();
   // std::cout << "curr_feature_num: " << curr_feature_num << std::endl;
@@ -204,9 +169,8 @@ void addFeatureObservations(const sensor_msgs::PointCloudConstPtr &o_msg, StateS
 
 /**
  * @brief 使用不再跟踪上的点进行状态更新
- * @param state_server 状态库
  */
-void removeLostFeatures(StateServer &state_server){
+void Estimator::removeLostFeatures(){
   // Remove the features that lost track.
   // BTW, find the size the final Jacobian matrix and residual vector.
   int jacobian_row_size = 0;
@@ -223,7 +187,7 @@ void removeLostFeatures(StateServer &state_server){
     // 跳过这些点
     // std::cout << "feature observation num :" <<
     //     feature.observations.size() << std::endl;
-    if (feature.observations.find(state_server.imu_state.id) !=
+    if (feature.observations.find(imu_state.id) !=
       feature.observations.end()) //使用find()，如果找到了，返回指向该元素的迭代器；如果没找到，返回指向map尾部的迭代器
       continue;
 
@@ -241,14 +205,14 @@ void removeLostFeatures(StateServer &state_server){
     if (!feature.is_initialized){
       // 3.1 看看运动是否足够，没有足够视差或者平移小旋转多这种不符合三角化
       // 所以就不要这些点了
-      if (!feature.checkMotion(state_server.cam_states)){
+      if (!feature.checkMotion(cam_states)){
           invalid_feature_ids.push_back(feature.id);
           // std::cout << "out narrow move " << std::endl;
           continue;
       }
       else{
         // 3.3 尝试三角化，失败也不要了
-        if (!feature.initializePosition(state_server.cam_states)){
+        if (!feature.initializePosition(cam_states)){
           invalid_feature_ids.push_back(feature.id);
           // std::cout << "out fail " << std::endl;
           continue;
@@ -276,7 +240,7 @@ void removeLostFeatures(StateServer &state_server){
       return;
 
     // 准备好误差相对于状态量的雅可比
-    MatrixXd H_x = MatrixXd::Zero(jacobian_row_size, 21 + 6 * state_server.cam_states.size());
+    MatrixXd H_x = MatrixXd::Zero(jacobian_row_size, 21 + 6 * cam_states.size());
     VectorXd r = VectorXd::Zero(jacobian_row_size);
     int stack_cntr = 0;
 
@@ -291,12 +255,12 @@ void removeLostFeatures(StateServer &state_server){
       MatrixXd H_xj;
       VectorXd r_j;
       // 6.1 计算雅可比，计算重投影误差
-      featureJacobian(feature.id, cam_state_ids, H_xj, r_j, state_server);
+      featureJacobian(feature.id, cam_state_ids, H_xj, r_j);
       // std::cout << "H_xj.size: " << H_xj.size() << std::endl;
       // std::cout << "r_j.size: " << r_j.size() << std::endl;
       // std::cout << "cam_state_ids.size(): " << cam_state_ids.size() << std::endl;
       // 6.2 卡方检验，剔除错误点，并不是所有点都用
-      if (gatingTest(H_xj, r_j, cam_state_ids.size() - 1, state_server)){
+      if (gatingTest(H_xj, r_j, cam_state_ids.size() - 1)){
           H_x.block(stack_cntr, 0, H_xj.rows(), H_xj.cols()) = H_xj;
           r.segment(stack_cntr, r_j.rows()) = r_j;
           stack_cntr += H_xj.rows();
@@ -313,7 +277,7 @@ void removeLostFeatures(StateServer &state_server){
 
     // Perform the measurement update step.
     // 7. 使用误差及雅可比更新状态
-    measurementUpdate(H_x, r, state_server);
+    measurementUpdate(H_x, r);
 
     // Remove all processed features from the map.
     // 8. 删除用完的点
@@ -321,7 +285,7 @@ void removeLostFeatures(StateServer &state_server){
         map_server.erase(feature_id);
 }
 
-void featureJacobian(const FeatureIDType &feature_id, const std::vector<StateIDType> &cam_state_ids, Eigen::MatrixXd &H_x, Eigen::VectorXd &r, StateServer &state_server){
+void Estimator::featureJacobian(const FeatureIDType &feature_id, const std::vector<StateIDType> &cam_state_ids, Eigen::MatrixXd &H_x, Eigen::VectorXd &r){
     // 取出特征
     const auto &feature = map_server[feature_id];
 
@@ -345,7 +309,7 @@ void featureJacobian(const FeatureIDType &feature_id, const std::vector<StateIDT
 
     // 误差相对于状态量的雅可比，没有约束列数，因为列数一直是最新的
     MatrixXd H_xj = MatrixXd::Zero(jacobian_row_size,
-                                    21 + state_server.cam_states.size() * 6);
+                                    21 + cam_states.size() * 6);
     // 误差相对于三维点的雅可比
     MatrixXd H_fj = MatrixXd::Zero(jacobian_row_size, 3);
     // 误差
@@ -360,12 +324,12 @@ void featureJacobian(const FeatureIDType &feature_id, const std::vector<StateIDT
         Matrix<double, 2, 3> H_fi = Matrix<double, 2, 3>::Zero();
         Vector2d r_i = Vector2d::Zero();
         // 2.1 计算一个左右目观测的雅可比
-        measurementJacobian(cam_id, feature.id, H_xi, H_fi, r_i, state_server);
+        measurementJacobian(cam_id, feature.id, H_xi, H_fi, r_i);
 
         // 计算这个cam_id在整个矩阵的列数，因为要在大矩阵里面放
-        auto cam_state_iter = state_server.cam_states.find(cam_id);
+        auto cam_state_iter = cam_states.find(cam_id);
         int cam_state_cntr = std::distance(
-            state_server.cam_states.begin(), cam_state_iter);
+            cam_states.begin(), cam_state_iter);
 
         // Stack the Jacobians.
         H_xj.block<2, 6>(stack_cntr, 21 + 6 * cam_state_cntr) = H_xi;
@@ -400,15 +364,15 @@ void featureJacobian(const FeatureIDType &feature_id, const std::vector<StateIDT
  * @param  H_f 误差相对于三维点的雅可比
  * @param  r 误差
  */
-void measurementJacobian(
+void Estimator::measurementJacobian(
     const StateIDType &cam_state_id,
     const FeatureIDType &feature_id,
-    Matrix<double, 2, 6> &H_x, Matrix<double, 2, 3> &H_f, Vector2d &r, StateServer &state_server)
+    Matrix<double, 2, 6> &H_x, Matrix<double, 2, 3> &H_f, Vector2d &r)
 {
 
     // Prepare all the required data.
     // 1. 取出相机状态与特征
-    const CAMState &cam_state = state_server.cam_states[cam_state_id];
+    const CAMState &cam_state = cam_states[cam_state_id];
     const Feature &feature = map_server[feature_id];
 
     // 2. 取出左目位姿，根据外参计算右目位姿
@@ -495,7 +459,7 @@ void measurementJacobian(
     //                     p_c1(0) / p_c1(2), p_c1(1) / p_c1(2));
   r = z - Vector2d(p_c0(0) / p_c0(2), p_c0(1) / p_c0(2));
 }
-void measurementUpdate(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, StateServer &state_server){
+void Estimator::measurementUpdate(const Eigen::MatrixXd &H, const Eigen::VectorXd &r){
   if (H.rows() == 0 || r.rows() == 0)
         return;
 
@@ -520,8 +484,8 @@ void measurementUpdate(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, State
         (spqr_helper.matrixQ().transpose() * H).evalTo(H_temp);
         (spqr_helper.matrixQ().transpose() * r).evalTo(r_temp);
 
-        H_thin = H_temp.topRows(21 + state_server.cam_states.size() * 6);
-        r_thin = r_temp.head(21 + state_server.cam_states.size() * 6);
+        H_thin = H_temp.topRows(21 + cam_states.size() * 6);
+        r_thin = r_temp.head(21 + cam_states.size() * 6);
     }
     else
     {
@@ -531,7 +495,7 @@ void measurementUpdate(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, State
 
     // 2. 标准的卡尔曼计算过程
     // Compute the Kalman gain.
-    const MatrixXd &P = state_server.state_cov;
+    const MatrixXd &P = state_cov;
     MatrixXd S = H_thin * P * H_thin.transpose() +
                     Feature::observation_noise * MatrixXd::Identity(
                                                     H_thin.rows(), H_thin.rows());
@@ -560,26 +524,26 @@ void measurementUpdate(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, State
     // 3. 更新到imu状态量
     const Vector4d dq_imu =
         smallAngleQuaternion(delta_x_imu.head<3>());
-    Vector4d tmp_rot = rotationToQuaternion(state_server.imu_state.rot_end);
+    Vector4d tmp_rot = rotationToQuaternion(imu_state.rot_end);
     // 相当于左乘dq_imu
     tmp_rot = quaternionMultiplication(dq_imu, tmp_rot);
-    state_server.imu_state.rot_end = quaternionToRotation(tmp_rot);
-    state_server.imu_state.bias_g += delta_x_imu.segment<3>(3);
-    state_server.imu_state.vel_end += delta_x_imu.segment<3>(6);
-    state_server.imu_state.bias_a += delta_x_imu.segment<3>(9);
-    state_server.imu_state.pos_end += delta_x_imu.segment<3>(12);
+    imu_state.rot_end = quaternionToRotation(tmp_rot);
+    imu_state.bias_g += delta_x_imu.segment<3>(3);
+    imu_state.vel_end += delta_x_imu.segment<3>(6);
+    imu_state.bias_a += delta_x_imu.segment<3>(9);
+    imu_state.pos_end += delta_x_imu.segment<3>(12);
 
     // 外参
     const Vector4d dq_extrinsic =
         smallAngleQuaternion(delta_x_imu.segment<3>(15));
     READ_RIC[0] =
-        quaternionToRotation(dq_extrinsic) * state_server.imu_state.R_imu_cam0;
+        quaternionToRotation(dq_extrinsic) * imu_state.R_imu_cam0;
     READ_TIC[0] += delta_x_imu.segment<3>(18);
 
     // Update the camera states.
     // 更新相机姿态
-    auto cam_state_iter = state_server.cam_states.begin();
-    for (int i = 0; i < state_server.cam_states.size(); ++i, ++cam_state_iter)
+    auto cam_state_iter = cam_states.begin();
+    for (int i = 0; i < cam_states.size(); ++i, ++cam_state_iter)
     {
         const VectorXd &delta_x_cam = delta_x.segment<6>(21 + i * 6);
         const Vector4d dq_cam = smallAngleQuaternion(delta_x_cam.head<3>());
@@ -593,21 +557,21 @@ void measurementUpdate(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, State
     // Update state covariance.
     // 4. 更新协方差
     MatrixXd I_KH = MatrixXd::Identity(K.rows(), H_thin.cols()) - K * H_thin;
-    // state_server.state_cov = I_KH*state_server.state_cov*I_KH.transpose() +
+    // state_cov = I_KH*state_cov*I_KH.transpose() +
     //   K*K.transpose()*Feature::observation_noise;
-    state_server.state_cov = I_KH * state_server.state_cov;
+    state_cov = I_KH * state_cov;
 
     // Fix the covariance to be symmetric
-    MatrixXd state_cov_fixed = (state_server.state_cov +
-                                state_server.state_cov.transpose()) /
+    MatrixXd state_cov_fixed = (state_cov +
+                                state_cov.transpose()) /
                                 2.0;
-    state_server.state_cov = state_cov_fixed;
+    state_cov = state_cov_fixed;
 }
-bool gatingTest(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, const int &dof, StateServer &state_server){
+bool Estimator::gatingTest(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, const int &dof){
   // 输入的dof的值是所有相机观测，且没有去掉滑窗的
     // 而且按照维度这个卡方的维度也不对
     // 
-    MatrixXd P1 = H * state_server.state_cov * H.transpose();
+    MatrixXd P1 = H * state_cov * H.transpose();
     MatrixXd P2 = Feature::observation_noise *
                     MatrixXd::Identity(H.rows(), H.rows());
     double gamma = r.transpose() * (P1 + P2).ldlt().solve(r);
@@ -625,16 +589,16 @@ bool gatingTest(const Eigen::MatrixXd &H, const Eigen::VectorXd &r, const int &d
     }
 }
 
-void pruneCamStateBuffer(StateServer &state_server){
+void Estimator::pruneCamStateBuffer(){
   // 数量还不到该删的程度，配置文件里面是20个
-  // std::cout << "state_server.cam_states.size: " << state_server.cam_states.size() << std::endl;
-    if (state_server.cam_states.size() < max_cam_state_size)
+  // std::cout << "cam_states.size: " << cam_states.size() << std::endl;
+    if (cam_states.size() < max_cam_state_size)
         return;
 
     // Find two camera states to be removed.
     // 1. 找出该删的相机状态的id，两个
     vector<StateIDType> rm_cam_state_ids(0);
-    findRedundantCamStates(rm_cam_state_ids, state_server);
+    findRedundantCamStates(rm_cam_state_ids);
     // Find the size of the Jacobian matrix.
     // 2. 找到删减帧涉及的观测雅可比大小
     int jacobian_row_size = 0;
@@ -664,7 +628,7 @@ void pruneCamStateBuffer(StateServer &state_server){
         if (!feature.is_initialized)
         {
             // Check if the feature can be initialize.
-            if (!feature.checkMotion(state_server.cam_states))
+            if (!feature.checkMotion(cam_states))
             {
                 // If the feature cannot be initialized, just remove
                 // the observations associated with the camera states
@@ -675,7 +639,7 @@ void pruneCamStateBuffer(StateServer &state_server){
             }
             else
             {
-                if (!feature.initializePosition(state_server.cam_states))
+                if (!feature.initializePosition(cam_states))
                 {
                     for (const auto &cam_id : involved_cam_state_ids)
                         feature.observations.erase(cam_id);
@@ -694,7 +658,7 @@ void pruneCamStateBuffer(StateServer &state_server){
     // 3. 计算待删掉的这部分观测的雅可比与误差
     // 预设大小
     MatrixXd H_x = MatrixXd::Zero(jacobian_row_size,
-                                    21 + 6 * state_server.cam_states.size());
+                                    21 + 6 * cam_states.size());
     VectorXd r = VectorXd::Zero(jacobian_row_size);
     int stack_cntr = 0;
 
@@ -721,9 +685,9 @@ void pruneCamStateBuffer(StateServer &state_server){
         // 这个点假如有多个观测，但本次只用待删除帧上的观测
         MatrixXd H_xj;
         VectorXd r_j;
-        featureJacobian(feature.id, involved_cam_state_ids, H_xj, r_j, state_server);
+        featureJacobian(feature.id, involved_cam_state_ids, H_xj, r_j);
 
-        if (gatingTest(H_xj, r_j, involved_cam_state_ids.size(), state_server))
+        if (gatingTest(H_xj, r_j, involved_cam_state_ids.size()))
         {
             H_x.block(stack_cntr, 0, H_xj.rows(), H_xj.cols()) = H_xj;
             r.segment(stack_cntr, r_j.rows()) = r_j;
@@ -740,7 +704,7 @@ void pruneCamStateBuffer(StateServer &state_server){
 
     // Perform measurement update.
     // 4. 用待删去的这些观测更新一下
-    measurementUpdate(H_x, r, state_server);
+    measurementUpdate(H_x, r);
 
     // 5. 直接删掉对应的行列，直接干掉
     // 为啥没有做类似于边缘化的操作？
@@ -748,51 +712,52 @@ void pruneCamStateBuffer(StateServer &state_server){
     for (const auto &cam_id : rm_cam_state_ids)
     {
         int cam_sequence = std::distance(
-            state_server.cam_states.begin(), state_server.cam_states.find(cam_id));
+            cam_states.begin(), cam_states.find(cam_id));
         int cam_state_start = 21 + 6 * cam_sequence;
         int cam_state_end = cam_state_start + 6;
 
         // Remove the corresponding rows and columns in the state
         // covariance matrix.
-        if (cam_state_end < state_server.state_cov.rows())
+        // std::cout << "cam_state_end: " << cam_state_end << std::endl;
+        // std::cout << "state_cov.rows(): " << state_cov.rows() << std::endl;
+        // std::cout << "state_cov.sizes(): " << state_cov.size() << std::endl;
+        if (cam_state_end < state_cov.rows())
         {
-            state_server.state_cov.block(cam_state_start, 0,
-                                         state_server.state_cov.rows() - cam_state_end,
-                                         state_server.state_cov.cols()) =
-                state_server.state_cov.block(cam_state_end, 0,
-                                             state_server.state_cov.rows() - cam_state_end,
-                                             state_server.state_cov.cols());
+            state_cov.block(cam_state_start, 0,
+                                         state_cov.rows() - cam_state_end,
+                                         state_cov.cols()) =
+                state_cov.block(cam_state_end, 0,
+                                             state_cov.rows() - cam_state_end,
+                                             state_cov.cols());
 
-            state_server.state_cov.block(0, cam_state_start,
-                                            state_server.state_cov.rows(),
-                                            state_server.state_cov.cols() - cam_state_end) =
-                state_server.state_cov.block(0, cam_state_end,
-                                                state_server.state_cov.rows(),
-                                                state_server.state_cov.cols() - cam_state_end);
+            state_cov.block(0, cam_state_start,
+                                            state_cov.rows(),
+                                            state_cov.cols() - cam_state_end) =
+                state_cov.block(0, cam_state_end,
+                                                state_cov.rows(),
+                                                state_cov.cols() - cam_state_end);
 
-            state_server.state_cov.conservativeResize(
-                state_server.state_cov.rows() - 6, state_server.state_cov.cols() - 6);
+            state_cov.conservativeResize(
+                state_cov.rows() - 6, state_cov.cols() - 6);
         }
         else
         {
-            state_server.state_cov.conservativeResize(
-                state_server.state_cov.rows() - 6, state_server.state_cov.cols() - 6);
+            state_cov.conservativeResize(
+                state_cov.rows() - 6, state_cov.cols() - 6);
         }
 
         // Remove this camera state in the state vector.
-        state_server.cam_states.erase(cam_id);
+        cam_states.erase(cam_id);
     }
-
 }
 /**
  * @brief 找出该删的相机状态的id
  * @param  rm_cam_state_ids 要删除的相机状态id
  */
-void findRedundantCamStates(vector<StateIDType> &rm_cam_state_ids,
-                            StateServer &state_server){
+void Estimator::findRedundantCamStates(vector<StateIDType> &rm_cam_state_ids){
     // Move the iterator to the key position.
     // 1. 找到倒数第四个相机状态，作为关键状态
-    auto key_cam_state_iter = state_server.cam_states.end();
+    auto key_cam_state_iter = cam_states.end();
     for (int i = 0; i < 4; ++i)
         --key_cam_state_iter;
 
@@ -801,7 +766,7 @@ void findRedundantCamStates(vector<StateIDType> &rm_cam_state_ids,
     ++cam_state_iter;
 
     // 序列中，第一个相机状态
-    auto first_cam_state_iter = state_server.cam_states.begin();
+    auto first_cam_state_iter = cam_states.begin();
 
     // Pose of the key camera state.
     // 2. 关键状态的位姿

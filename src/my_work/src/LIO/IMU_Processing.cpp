@@ -376,12 +376,7 @@ ImuProcess::imu_integration(const StatesGroup &state_in,
       Eigen::Matrix<double, DIM_OF_STATES, DIM_OF_STATES>::Zero());
   double dt = 0;
   int if_first_imu = 1;
-  // printf("IMU start_time = %.5f, end_time = %.5f, state_update_time = %.5f,
-  // start_delta = %.5f\r\n", v_imu.front()->header.stamp.toSec() -
-  // g_lidar_star_tim,
-  //        v_imu.back()->header.stamp.toSec() - g_lidar_star_tim,
-  //        state_in.last_update_time - g_lidar_star_tim,
-  //        state_in.last_update_time - v_imu.front()->header.stamp.toSec());
+
   for (std::deque<sensor_msgs::Imu::ConstPtr>::iterator it_imu = v_imu.begin();
        it_imu != (v_imu.end() - 1); it_imu++) {
     // if(g_lidar_star_tim == 0 || state_inout.last_update_time == 0)
